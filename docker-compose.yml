@@ -1,0 +1,82 @@
+services:
+  app:
+    build: .
+    container_name: backend-app
+    ports:
+      - "8090:8090"          # LAN — front가 호출
+    environment:
+      ES_URL: http://elasticsearch:9200
+      EMBEDDING_URL: http://embedding:8080
+      LLM_URL: ${LLM_URL:?set-in-env}          # .164 wrapper (배포 .env — repo에 IP 금지)
+      LOG_REDIS_URL: redis://redis:6379
+      SERVER_NAME: backend
+      SYNC_SECRET: ${SYNC_SECRET:?set-in-env}
+      STUDY_NOTE_REMOTE: https://github.com/junhyeong9812/study-note.git
+    volumes:
+      - study-note-repo:/data/study-note       # clone 볼륨 (sync가 pull)
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    healthcheck:
+      # localhost 금지 — 컨테이너 안에서 ::1로 풀려 IPv4 바인딩 서버가 unhealthy로 찍힘
+      test: ["CMD-SHELL", "curl -fsS -m 5 http://127.0.0.1:8090/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  elasticsearch:
+    build: ./elasticsearch
+    container_name: backend-es
+    expose:
+      - "9200"               # 내부 전용 — 호스트·LAN 비노출 (경계: 앱만 엣지에)
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"          # LAN 내부 전용 전제
+      ES_JAVA_OPTS: "-Xms2g -Xmx2g"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -m 5 http://127.0.0.1:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: backend-redis
+    command: ["redis-server", "--appendonly", "no", "--save", ""]   # 로그 큐 — 영속 불필요(정본은 stdout)
+    ports:
+      - "6379:6379"          # LAN — llm(.164) 등 타 호스트가 XADD (docs/logging.md 예약 포트)
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  embedding:
+    image: embedding-embedding:latest          # local-llm에서 보존한 BGE-M3 이미지 (.158 로컬)
+    container_name: backend-embedding
+    expose:
+      - "8080"               # 내부 전용 — backend만 호출
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -m 5 http://127.0.0.1:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  es-data:
+  study-note-repo:
