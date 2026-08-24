@@ -1,0 +1,46 @@
+package xyz.junproject.backend.sync
+
+import org.springframework.http.HttpStatus
+import org.springframework.http.ResponseEntity
+import org.springframework.web.bind.annotation.*
+import xyz.junproject.backend.common.Envelope
+import xyz.junproject.backend.common.RequestLog
+
+data class SyncIn(val request_id: String?, val commit_sha: String?)
+
+@RestController
+@RequestMapping("/internal")
+class SyncController(private val sync: SyncService, private val requestLog: RequestLog) {
+    private val secret = System.getenv("SYNC_SECRET") ?: ""
+
+    @PostMapping("/sync")
+    fun sync(@RequestHeader("X-Sync-Secret") providedSecret: String?,
+             @RequestBody(required = false) body: SyncIn?): ResponseEntity<Map<String, Any?>> {
+        if (secret.isBlank() || providedSecret != secret) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Envelope.fail("unauthorized"))
+        }
+        val requestId = body?.request_id ?: requestLog.newRequestId()   // 발행 주체 = backend (규약)
+        return when (val decision = sync.requestSync(requestId, body?.commit_sha)) {
+            is SyncService.Decision.Skip -> {
+                requestLog.log(requestId, "sync skipped: ${decision.reason} sha=${body?.commit_sha}")
+                ResponseEntity.ok(Envelope.ok(mapOf("skipped" to decision.reason)))
+            }
+            is SyncService.Decision.Busy -> {
+                requestLog.log(requestId, "sync rejected: busy", "warning")
+                ResponseEntity.status(HttpStatus.CONFLICT)
+                    .body(Envelope.fail("sync_in_progress", retryAfter = 30))
+            }
+            is SyncService.Decision.Started ->
+                ResponseEntity.accepted().body(Envelope.ok(
+                    mapOf("started" to decision.note, "request_id" to requestId)))
+        }
+    }
+
+    @GetMapping("/sync/status")
+    fun status(@RequestHeader("X-Sync-Secret") providedSecret: String?): ResponseEntity<Map<String, Any?>> {
+        if (secret.isBlank() || providedSecret != secret) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Envelope.fail("unauthorized"))
+        }
+        return ResponseEntity.ok(Envelope.ok(sync.status()))
+    }
+}

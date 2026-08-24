@@ -12,6 +12,8 @@ services:
       SERVER_NAME: backend
       SYNC_SECRET: ${SYNC_SECRET:?set-in-env}
       STUDY_NOTE_REMOTE: https://github.com/junhyeong9812/study-note.git
+      REPO_DIR: /data/study-note/repo
+      STATE_FILE: /data/study-note/last_sha
     volumes:
       - study-note-repo:/data/study-note       # clone 볼륨 (sync가 pull)
     depends_on:
@@ -71,7 +73,8 @@ services:
               count: all
               capabilities: [gpu]
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS -m 5 http://127.0.0.1:8080/health || exit 1"]
+      # /health/deep — GPU 실추론 확인. 얕은 /health는 GPU 유실을 못 잡았던 실측 이력(2026-07-31, 6일 헛-healthy)
+      test: ["CMD-SHELL", "curl -fsS -m 25 http://127.0.0.1:8080/health/deep || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
