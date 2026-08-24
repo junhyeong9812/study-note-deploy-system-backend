@@ -20,18 +20,23 @@
 | `subject` | keyword | **마지막 폴더명 = 주제**. 파일이 topic 직속이면(`cs/index.md`) subject=topic | `operational-standards` |
 | `depth` | integer | 폴더 깊이 | 3 |
 
-## D3. 문서 유형 — 파일명 기반 enum + fallback
+## D3. 문서 유형 — 형태(form) 이원화 + 파일명 enum
 
-`doc_kind`(keyword): `question | summary | answer | problem | analyze | index | readme | note`
+**`form`(keyword) — 문서 형태 2분법**:
+- `chapter` — 1/2/3 규약 챕터 (question↔answer 매핑·복습 UI 대상)
+- `post` — 단일 기록(블로그형): 세미나·reference/writing evidence·guide 등 자유형. 위키에서 별도 섹션("기록")으로 노출
+
+`doc_kind`(keyword): `question | summary | answer | index | readme | post`
+(코테 problem/analyze는 study-note 규약 통일로 question/answer에 흡수 — 인덱서는 과거 파일명도 question/answer로 매핑)
 
 | 파일명 | kind | 비고 |
 |---|---|---|
-| 1-question.md / 2-summary.md / 3-answer.md | question/summary/answer | 학습 3종 (495개) |
-| problem.md / analyze.md | problem/analyze | programmers 코테 2종 (94개) |
+| 1-question.md / 2-summary.md / 3-answer.md | question/summary/answer (form=chapter) | 학습 3종. 2-summary 부재 허용(코테) |
+| problem.md / analyze.md | question/answer (과거 호환 매핑) | 통일 rename 후 소멸 예정 |
 | index.md / README.md | index/readme | 목차·규칙 |
-| **그 외 전부** | `note` | evidence·세미나·guide 등 자유형 — **규약 강제하지 않음** |
+| **그 외 전부** | `post` (form=post) | 세미나·evidence·guide — 블로그형 단일 기록 |
 
-- 검색 UI 기본값: `summary·answer·analyze·note`만 (question은 답이 없는 문서, problem은 문제 지문이라 검색 노이즈 — 필터로 켤 수 있게).
+- 검색 UI 기본값: `summary·answer·post`만 (question은 답이 없는 문서, problem은 문제 지문이라 검색 노이즈 — 필터로 켤 수 있게).
 - 새 파일명 패턴이 나타나면 `note`로 흡수되므로 파이프라인이 깨지지 않는다 (fail-open은 유형 판정만; 색인 실패는 로그+재시도).
 
 ## D4. 매핑 (인덱스 `study-v1`, alias `study`)
@@ -52,6 +57,7 @@
     "topic_path": { "type": "keyword" },
     "subject":    { "type": "keyword" },
     "depth":      { "type": "integer" },
+    "form":       { "type": "keyword" },
     "doc_kind":   { "type": "keyword" },
     "title":      { "type": "text", "analyzer": "ko" },     // h1 또는 파일명
     "heading":    { "type": "text", "analyzer": "ko" },     // 청크 헤딩 트레일 "h2 > h3"
