@@ -3,6 +3,9 @@ server:
 spring:
   application:
     name: backend
+  data:
+    redis:
+      url: ${LOG_REDIS_URL:redis://redis:6379}   # 미지정 시 Spring 기본 localhost = 컨테이너 자신 (함정)
 management:
   endpoints:
     web:
