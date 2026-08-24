@@ -21,6 +21,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+      embedding:
+        condition: service_healthy   # BGE-M3 모델 로딩(1~2분) 전에 /embed를 치면 연결 거부 (실측)
     healthcheck:
       # localhost 금지 — 컨테이너 안에서 ::1로 풀려 IPv4 바인딩 서버가 unhealthy로 찍힘
       test: ["CMD-SHELL", "curl -fsS -m 5 http://127.0.0.1:8090/actuator/health || exit 1"]

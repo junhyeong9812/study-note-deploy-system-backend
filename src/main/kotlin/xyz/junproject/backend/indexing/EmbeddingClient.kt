@@ -1,12 +1,20 @@
 package xyz.junproject.backend.indexing
 
+import org.springframework.http.client.SimpleClientHttpRequestFactory
 import org.springframework.stereotype.Component
 import org.springframework.web.client.RestClient
+import java.time.Duration
 
 /** BGE-M3 dense 임베딩 (sparse는 1차 제외 — es-index.md D4 [구현 검증] #2). */
 @Component
 class EmbeddingClient {
-    private val client = RestClient.create(System.getenv("EMBEDDING_URL") ?: "http://embedding:8080")
+    private val client = RestClient.builder()
+        .baseUrl(System.getenv("EMBEDDING_URL") ?: "http://embedding:8080")
+        .requestFactory(SimpleClientHttpRequestFactory().apply {
+            setConnectTimeout(Duration.ofSeconds(5))
+            setReadTimeout(Duration.ofMinutes(3))   // 대형 파일(58KB→다청크) 배치 대비
+        })
+        .build()
 
     @Suppress("UNCHECKED_CAST")
     fun embed(texts: List<String>): List<List<Double>> {
