@@ -41,7 +41,10 @@ class ContentController(private val git: GitRepository, private val requestLog: 
         }
         val content = try {
             git.readFile(path)
-        } catch (_: Exception) {
+        } catch (_: java.io.FileNotFoundException) {           // 부재만 404 — I/O 장애는 전역 500 봉투로
+            requestLog.log(requestId, "doc not found: $path", "warning")
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Envelope.fail("not_found"))
+        } catch (_: java.nio.file.NoSuchFileException) {
             requestLog.log(requestId, "doc not found: $path", "warning")
             return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Envelope.fail("not_found"))
         }

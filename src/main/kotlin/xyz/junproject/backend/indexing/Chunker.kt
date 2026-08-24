@@ -84,7 +84,7 @@ object Chunker {
         val buffer = StringBuilder(); var bufferBytes = 0
         for (line in paragraph.lines()) {
             val chunked = if (line.toByteArray().size > SPLIT_THRESHOLD_BYTES)
-                line.chunked(SPLIT_THRESHOLD_BYTES / 4) else listOf(line)   // 문자 경계 최후 수단
+                chunkedByCodePoints(line, SPLIT_THRESHOLD_BYTES / 4) else listOf(line)   // 최후 수단
             for (piece in chunked) {
                 val pieceBytes = piece.toByteArray().size
                 if (bufferBytes > 0 && bufferBytes + pieceBytes > SPLIT_THRESHOLD_BYTES) {
@@ -94,6 +94,19 @@ object Chunker {
             }
         }
         if (buffer.isNotBlank()) pieces.add(buffer.toString())
+        return pieces
+    }
+
+    /** 코드포인트 경계 분할 — String.chunked는 UTF-16 단위라 surrogate pair를 찢을 수 있다 (재점검 반영) */
+    private fun chunkedByCodePoints(text: String, sizeInUnits: Int): List<String> {
+        val pieces = mutableListOf<String>()
+        var start = 0
+        while (start < text.length) {
+            var end = minOf(start + sizeInUnits, text.length)
+            if (end < text.length && Character.isHighSurrogate(text[end - 1])) end -= 1
+            pieces.add(text.substring(start, end))
+            start = end
+        }
         return pieces
     }
 }
