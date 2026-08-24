@@ -75,11 +75,13 @@ services:
               count: all
               capabilities: [gpu]
     healthcheck:
-      # /health/deep — GPU 실추론 확인. 얕은 /health는 GPU 유실을 못 잡았던 실측 이력(2026-07-31, 6일 헛-healthy)
-      test: ["CMD-SHELL", "curl -fsS -m 25 http://127.0.0.1:8080/health/deep || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      # /health/deep — GPU 실추론 확인(얕은 /health는 GPU 유실을 6일간 못 잡은 실측 이력).
+      # 이미지에 curl 없음 → python urllib (local-llm 원본 방식). 매 체크가 GPU 추론 1건이라 간격 60s.
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/health/deep', timeout=20)\" || exit 1"]
+      interval: 60s
+      timeout: 25s
+      retries: 5
+      start_period: 300s     # 모델 로딩 여유
     restart: unless-stopped
 
 volumes:
