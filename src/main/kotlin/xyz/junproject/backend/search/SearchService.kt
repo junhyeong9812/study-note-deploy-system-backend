@@ -29,11 +29,15 @@ class SearchService(
         val bm25Query = if (rewrite.used)
             (listOf(query) + rewrite.keywords + rewrite.expanded).distinct().joinToString(" ")
         else query
-        val filterTopic = topic ?: rewrite.topic.takeIf { rewrite.used }
-        // 필터 우선순위: 명시 파라미터 > rewrite 제안 > 기본값 (B2)
-        val filterKinds = docKinds?.takeIf { it.isNotEmpty() }
-            ?: rewrite.docKind?.let { listOf(it) }
-            ?: defaultKinds
+        // 하드 필터는 명시 파라미터만. rewrite 제안(topic·doc_kind)은 필터로 쓰지 않는다 —
+        // 실측(2026-08-24): "세마포어가 뭐야"에 모델이 doc_kind=question을 제안해 정리·정답이 전멸.
+        // 제안은 로그로만 남겨 실측 데이터화 ([구현 검증] #7).
+        val filterTopic = topic
+        val filterKinds = docKinds?.takeIf { it.isNotEmpty() } ?: defaultKinds
+        if (rewrite.used && (rewrite.topic != null || rewrite.docKind != null)) {
+            requestLog.log(requestId,
+                "rewrite hint (미적용): topic=${rewrite.topic} doc_kind=${rewrite.docKind}")
+        }
 
         val bm25Ranking = bm25(bm25Query, filterTopic, filterKinds, size * 2)
         val (knnRanking, denseUsed) = try {

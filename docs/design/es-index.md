@@ -72,7 +72,7 @@
 ```
 
 - **버전 인덱스 + alias**: 매핑 변경 시 `study-v2` 만들어 재색인 → alias 스왑(다운타임 0).
-- 검색: `multi_match(title^3, heading^2, content)` BM25 + `knn(dense)` → **수동 RRF(k=60)** 병합. `topic`·`doc_kind` 필터는 양쪽 모두에 적용.
+- 검색: `multi_match(title^3, heading^2, content)` BM25 + `knn(dense)` → **수동 RRF(k=60)** 병합. `topic`·`doc_kind` **하드 필터는 명시 파라미터만** 양쪽에 적용 — rewrite 제안 필터는 과필터 실측(2026-08-24)으로 미적용(로그로 축적, [구현 검증] #7).
 - `[구현 검증]` nori 세부(사용자 사전·decompound 모드), BGE-M3 sparse를 `rank_features`로 추가할지(1차 제외), RRF k값 — 구현 시 실데이터로 판정. → 중앙 대장 `docs/design/implementation-verification.md`.
 
 ## D5. 색인 파이프라인 불변식
