@@ -1,3 +1,3 @@
-# backend
+# study-note-deploy-system-backend
 
-deploy-study-note backend — webhook·git pull·렌더·ES 색인·검색 API (.158)
+webhook·git pull·렌더·ES 색인·검색 API (.158)
