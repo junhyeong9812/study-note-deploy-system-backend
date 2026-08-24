@@ -37,7 +37,7 @@
 | **그 외 전부** | `post` (form=post) | 세미나·evidence·guide — 블로그형 단일 기록 |
 
 - 검색 UI 기본값: `summary·answer·post`만 (question은 답이 없는 문서, problem은 문제 지문이라 검색 노이즈 — 필터로 켤 수 있게).
-- 새 파일명 패턴이 나타나면 `note`로 흡수되므로 파이프라인이 깨지지 않는다 (fail-open은 유형 판정만; 색인 실패는 로그+재시도).
+- 새 파일명 패턴이 나타나면 `post`로 흡수되므로 파이프라인이 깨지지 않는다 (fail-open은 유형 판정만; 색인 실패는 로그+재시도).
 
 ## D4. 매핑 (인덱스 `study-v1`, alias `study`)
 
@@ -72,10 +72,13 @@
 ```
 
 - **버전 인덱스 + alias**: 매핑 변경 시 `study-v2` 만들어 재색인 → alias 스왑(다운타임 0).
-- 검색: `multi_match(title^3, heading^2, content)` BM25 + `knn(dense)` → **수동 RRF(k=60)** 병합. `topic`·`doc_kind` 필터는 양쪽 모두에 적용.
+- 검색: `multi_match(title^3, heading^2, content)` BM25 + `knn(dense)` → **수동 RRF(k=60)** 병합. `topic`·`doc_kind` **하드 필터는 명시 파라미터만** 양쪽에 적용 — rewrite 제안 필터는 과필터 실측(2026-08-24)으로 미적용(로그로 축적, [구현 검증] #7).
 - `[구현 검증]` nori 세부(사용자 사전·decompound 모드), BGE-M3 sparse를 `rank_features`로 추가할지(1차 제외), RRF k값 — 구현 시 실데이터로 판정. → 중앙 대장 `docs/design/implementation-verification.md`.
 
 ## D5. 색인 파이프라인 불변식
+
+> **sync 트리거 의미론(리뷰 B13 확정)**: 요청의 `commit_sha`는 **중복 트리거 판별용 힌트**이고, 색인 대상은 항상 **원격 HEAD**다. 요청 SHA보다 HEAD가 앞서면 최신을 색인한다(수렴) — 뒤처진 SHA의 재요청은 no-op으로 수렴하므로 멱등이 유지된다. 특정 SHA 고정 색인은 지원하지 않는다.
+
 
 1. 색인 입력 = **git diff `<last_sha>..HEAD` `--name-status`** 의 md만 (전체 스캔은 수동 `/sync` 전용).
 2. A/M → 해당 path 청크 전량 교체(delete_by_query → bulk upsert — 청크 수 감소 시 고아 방지). R → 구 path delete + 신 path 색인. D → delete.

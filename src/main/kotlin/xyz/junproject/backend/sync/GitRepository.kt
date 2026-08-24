@@ -4,7 +4,7 @@ import org.springframework.stereotype.Component
 import java.io.File
 import java.util.concurrent.TimeUnit
 
-/** study-note clone 볼륨 관리 — shell git (컨테이너에 git 설치, es-index.md D5-1: diff가 색인 입력의 정본). */
+/** study-note clone 볼륨 관리 — shell git (es-index.md D5-1: diff가 색인 입력의 정본). */
 @Component
 class GitRepository {
     private val repoDir = File(System.getenv("REPO_DIR") ?: "/data/study-note/repo")
@@ -22,17 +22,21 @@ class GitRepository {
         return run("git", "rev-parse", "HEAD").trim()
     }
 
-    /** prev..HEAD의 md 변경 목록. 반환: (상태 A/M/D, 경로) — R은 D(구경로)+A(신경로)로 풀어서 반환 */
+    class ShaUnresolvable(message: String) : RuntimeException(message)
+
+    /** prev..HEAD의 md 변경 목록. shallow 경계 밖 prev면 ShaUnresolvable → 호출부가 full로 강등 (B7) */
     fun changedMarkdown(prevSha: String, headSha: String): List<Pair<Char, String>> {
-        // core.quotepath=off — 한글 경로를 8진수 이스케이프로 감싸는 git 기본 동작 차단 (실측: 파일 못 찾음)
-        val output = run("git", "-c", "core.quotepath=off", "diff", "--name-status", "-M", "$prevSha..$headSha", "--", "*.md")
-        return output.lines().filter { it.isNotBlank() }.flatMap { line ->
-            val parts = line.split("\t")
-            when {
-                parts[0].startsWith("R") -> listOf('D' to parts[1], 'A' to parts[2])
-                else -> listOf(parts[0][0] to parts[1])
-            }
+        val output = try {
+            // core.quotepath=off — 한글 경로 8진수 이스케이프 차단 (실측)
+            run("git", "-c", "core.quotepath=off", "diff", "--name-status", "-M",
+                "$prevSha..$headSha", "--", "*.md")
+        } catch (error: IllegalStateException) {
+            if (error.message?.contains("bad object") == true ||
+                error.message?.contains("unknown revision") == true)
+                throw ShaUnresolvable("prev=$prevSha (shallow 경계 밖 추정)")
+            else throw error
         }
+        return parseNameStatus(output)
     }
 
     fun allMarkdown(): List<String> =
@@ -42,9 +46,30 @@ class GitRepository {
 
     private fun run(vararg command: String, workDir: File = repoDir): String {
         val process = ProcessBuilder(*command).directory(workDir).redirectErrorStream(true).start()
-        val output = process.inputStream.bufferedReader().readText()
-        if (!process.waitFor(120, TimeUnit.SECONDS)) { process.destroyForcibly(); error("git timeout: ${command.joinToString(" ")}") }
-        check(process.exitValue() == 0) { "git 실패(${command.joinToString(" ")}): ${output.take(300)}" }
-        return output
+        // 출력 소비를 별도 스레드로 — 프로세스 행 시 readText가 waitFor 이전에 무한 블록하는 것 방지 (B8)
+        val outputBuffer = StringBuilder()
+        val reader = Thread { process.inputStream.bufferedReader().forEachLine { outputBuffer.appendLine(it) } }
+        reader.start()
+        if (!process.waitFor(120, TimeUnit.SECONDS)) {
+            process.destroyForcibly()
+            reader.join(2000)
+            error("git timeout: ${command.joinToString(" ")}")
+        }
+        reader.join(5000)
+        check(process.exitValue() == 0) { "git 실패(${command.joinToString(" ")}): ${outputBuffer.take(300)}" }
+        return outputBuffer.toString()
+    }
+
+    companion object {
+        /** --name-status 출력 파싱 (순수 함수 — 테스트 이음새, B9). R은 D(구)+A(신)로 분해 */
+        fun parseNameStatus(output: String): List<Pair<Char, String>> =
+            output.lines().filter { it.isNotBlank() }.flatMap { line ->
+                val parts = line.split("\t")
+                when {
+                    parts[0].startsWith("R") && parts.size >= 3 -> listOf('D' to parts[1], 'A' to parts[2])
+                    parts.size >= 2 -> listOf(parts[0][0] to parts[1])
+                    else -> emptyList()
+                }
+            }
     }
 }

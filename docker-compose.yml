@@ -3,7 +3,8 @@ services:
     build: .
     container_name: backend-app
     ports:
-      - "8090:8090"          # LAN — front가 호출
+      # 전제: 호스트는 사설 LAN 단일 인터페이스(공유기 뒤). 공인 인터페이스가 생기면 BIND_ADDR로 제한 (리뷰 B14)
+      - "${BIND_ADDR:?set-in-env}:8090:8090"   # fail-closed — 배포 .env가 LAN 주소 지정 (감사 반영)
     environment:
       ES_URL: http://elasticsearch:9200
       EMBEDDING_URL: http://embedding:8080
@@ -54,7 +55,7 @@ services:
     container_name: backend-redis
     command: ["redis-server", "--appendonly", "no", "--save", ""]   # 로그 큐 — 영속 불필요(정본은 stdout)
     ports:
-      - "6379:6379"          # LAN — llm(.164) 등 타 호스트가 XADD (docs/logging.md 예약 포트)
+      - "${BIND_ADDR:?set-in-env}:6379:6379"   # LAN — llm(.164) 등 타 호스트가 XADD (docs/logging.md 예약 포트)
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 30s

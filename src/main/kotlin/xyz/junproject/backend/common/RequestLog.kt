@@ -18,6 +18,11 @@ class RequestLog(private val redis: StringRedisTemplate) {
 
     fun newRequestId(): String = "req-" + java.util.UUID.randomUUID().toString().take(12)
 
+    /** 인입 requestId 검증 — 규약 포맷(콜론 구분)을 깨는 값이면 재발행 (B11) */
+    fun acceptOrIssue(incoming: String?): String =
+        if (incoming != null && incoming.matches(Regex("^[A-Za-z0-9_-]{1,64}$"))) incoming
+        else newRequestId()
+
     fun formatLine(requestId: String, message: String) = "$requestId:$serverName:$message"
 
     fun log(requestId: String, message: String, level: String = "info") {
@@ -31,7 +36,12 @@ class RequestLog(private val redis: StringRedisTemplate) {
             val record = StreamRecords.mapBacked<String, String, String>(
                 mapOf("level" to level, "line" to line)
             ).withStreamKey(stream)
-            redis.opsForStream<String, String>().add(record)
+            // MAXLEN ~10000 — 소비자 부재 기간에도 Redis 메모리 상한 유지 (규약: 정본은 stdout)
+            redis.opsForStream<String, String>().add(
+                record,
+                org.springframework.data.redis.connection.RedisStreamCommands.XAddOptions.maxlen(10_000)
+                    .approximateTrimming(true),
+            )
         } catch (_: Exception) {
             // 중앙 큐는 best-effort — 정본은 stdout (docs/logging.md)
         }
