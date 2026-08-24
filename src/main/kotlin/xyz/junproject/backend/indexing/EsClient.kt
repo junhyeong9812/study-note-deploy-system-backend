@@ -16,18 +16,18 @@ class EsClient {
             true
         } catch (_: Exception) { false }
         if (exists) return
-        client.put().uri("/$indexName").body(MAPPING_JSON).header("Content-Type", "application/json")
+        client.put().uri("/$indexName").body(MAPPING_JSON.toByteArray()).header("Content-Type", "application/json; charset=utf-8")
             .retrieve().toBodilessEntity()
         client.post().uri("/_aliases")
-            .body("""{"actions":[{"add":{"index":"$indexName","alias":"$alias"}}]}""")
-            .header("Content-Type", "application/json").retrieve().toBodilessEntity()
+            .body("""{"actions":[{"add":{"index":"$indexName","alias":"$alias"}}]}""".toByteArray())
+            .header("Content-Type", "application/json; charset=utf-8").retrieve().toBodilessEntity()
     }
 
     /** path의 기존 청크 전량 삭제 — 청크 수 감소 시 고아 방지 (D5-2) */
     fun deleteByPath(path: String) {
         client.post().uri("/$indexName/_delete_by_query?refresh=true")
-            .body("""{"query":{"term":{"path":"${'$'}{escape(path)}"}}}""".replace("${'$'}{escape(path)}", escape(path)))
-            .header("Content-Type", "application/json").retrieve().toBodilessEntity()
+            .body("""{"query":{"term":{"path":"${escape(path)}"}}}""".toByteArray())
+            .header("Content-Type", "application/json; charset=utf-8").retrieve().toBodilessEntity()
     }
 
     fun bulkUpsert(documents: List<Pair<String, String>>) {  // (docId, sourceJson)
@@ -38,15 +38,20 @@ class EsClient {
                 appendLine(source)
             }
         }
-        val response = client.post().uri("/_bulk?refresh=true").body(body)
-            .header("Content-Type", "application/x-ndjson").retrieve().body(Map::class.java)
-        if (response?.get("errors") == true) error("bulk 색인 부분 실패: ${'$'}response")
+        val response = client.post().uri("/_bulk?refresh=true").body(body.toByteArray())
+            .header("Content-Type", "application/x-ndjson; charset=utf-8").retrieve().body(Map::class.java)
+        if (response?.get("errors") == true) {
+            @Suppress("UNCHECKED_CAST")
+            val firstError = (response["items"] as? List<Map<String, Map<String, Any?>>>)
+                ?.firstNotNullOfOrNull { it["index"]?.get("error") }
+            error("bulk 색인 부분 실패: $firstError")
+        }
     }
 
     fun countByPath(path: String): Long {
         val response = client.post().uri("/$indexName/_count")
-            .body("""{"query":{"term":{"path":"${escape(path)}"}}}""")
-            .header("Content-Type", "application/json").retrieve().body(Map::class.java)
+            .body("""{"query":{"term":{"path":"${escape(path)}"}}}""".toByteArray())
+            .header("Content-Type", "application/json; charset=utf-8").retrieve().body(Map::class.java)
         return (response?.get("count") as? Number)?.toLong() ?: -1
     }
 

@@ -24,7 +24,8 @@ class GitRepository {
 
     /** prev..HEAD의 md 변경 목록. 반환: (상태 A/M/D, 경로) — R은 D(구경로)+A(신경로)로 풀어서 반환 */
     fun changedMarkdown(prevSha: String, headSha: String): List<Pair<Char, String>> {
-        val output = run("git", "diff", "--name-status", "-M", "$prevSha..$headSha", "--", "*.md")
+        // core.quotepath=off — 한글 경로를 8진수 이스케이프로 감싸는 git 기본 동작 차단 (실측: 파일 못 찾음)
+        val output = run("git", "-c", "core.quotepath=off", "diff", "--name-status", "-M", "$prevSha..$headSha", "--", "*.md")
         return output.lines().filter { it.isNotBlank() }.flatMap { line ->
             val parts = line.split("\t")
             when {
@@ -35,7 +36,7 @@ class GitRepository {
     }
 
     fun allMarkdown(): List<String> =
-        run("git", "ls-files", "*.md").lines().filter { it.isNotBlank() }
+        run("git", "-c", "core.quotepath=off", "ls-files", "*.md").lines().filter { it.isNotBlank() }
 
     fun readFile(path: String): String = File(repoDir, path).readText()
 
