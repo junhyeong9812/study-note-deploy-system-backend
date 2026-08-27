@@ -1,10 +1,10 @@
-package xyz.junproject.backend.sync
+package xyz.junproject.backend.usecase
 
 import io.mockk.*
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
-import xyz.junproject.backend.common.RequestLog
-import xyz.junproject.backend.indexing.IndexingService
+import xyz.junproject.backend.infra.RequestLog
+import xyz.junproject.backend.infra.GitRepository
 import java.nio.file.Files
 
 /** 멱등·single-flight 판정 경로 우선 (spec ⑤ — 거절 경로 먼저). */

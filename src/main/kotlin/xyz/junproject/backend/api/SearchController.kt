@@ -1,10 +1,12 @@
-package xyz.junproject.backend.search
+package xyz.junproject.backend.api
+
+import xyz.junproject.backend.usecase.SearchService
 
 import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.*
-import xyz.junproject.backend.common.Envelope
-import xyz.junproject.backend.common.RequestLog
+import xyz.junproject.backend.api.Envelope
+import xyz.junproject.backend.infra.RequestLog
 
 @RestController
 @RequestMapping("/api")

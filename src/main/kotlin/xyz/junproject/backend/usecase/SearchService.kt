@@ -1,13 +1,14 @@
-package xyz.junproject.backend.search
+package xyz.junproject.backend.usecase
+
+import xyz.junproject.backend.infra.LlmClient
+
+import xyz.junproject.backend.domain.SearchHit
 
 import org.springframework.stereotype.Service
 import tools.jackson.databind.ObjectMapper
-import xyz.junproject.backend.common.RequestLog
-import xyz.junproject.backend.indexing.EmbeddingClient
-import xyz.junproject.backend.indexing.EsClient
-
-data class SearchHit(val path: String, val chunkNo: Int, val heading: String,
-                     val snippet: String, val docKind: String, val score: Double)
+import xyz.junproject.backend.infra.RequestLog
+import xyz.junproject.backend.infra.EmbeddingClient
+import xyz.junproject.backend.infra.EsClient
 
 /**
  * 하이브리드 검색 — BM25(nori) + kNN(dense)을 각각 실행해 수동 RRF(k=60)로 병합 (es-index.md D4).

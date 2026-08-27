@@ -1,12 +1,12 @@
-package xyz.junproject.backend.content
+package xyz.junproject.backend.api
 
 import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.*
-import xyz.junproject.backend.common.Envelope
-import xyz.junproject.backend.common.RequestLog
-import xyz.junproject.backend.indexing.DocClassifier
-import xyz.junproject.backend.sync.GitRepository
+import xyz.junproject.backend.api.Envelope
+import xyz.junproject.backend.infra.RequestLog
+import xyz.junproject.backend.domain.DocClassifier
+import xyz.junproject.backend.infra.GitRepository
 
 /** 콘텐츠 API — 문서 목록·원문. 렌더는 front 책임(설계: backend는 콘텐츠 JSON만). */
 @RestController

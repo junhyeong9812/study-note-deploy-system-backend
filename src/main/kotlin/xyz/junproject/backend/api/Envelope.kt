@@ -1,4 +1,4 @@
-package xyz.junproject.backend.common
+package xyz.junproject.backend.api
 
 /** 응답 정규화 봉투 — llm wrapper와 동일 규약. success 플래그 하나로 분기한다. */
 object Envelope {

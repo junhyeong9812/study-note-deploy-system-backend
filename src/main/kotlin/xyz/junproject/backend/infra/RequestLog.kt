@@ -1,4 +1,4 @@
-package xyz.junproject.backend.common
+package xyz.junproject.backend.infra
 
 import org.slf4j.LoggerFactory
 import org.springframework.data.redis.connection.stream.StreamRecords

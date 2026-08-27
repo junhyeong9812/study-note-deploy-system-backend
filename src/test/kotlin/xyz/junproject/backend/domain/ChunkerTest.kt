@@ -1,4 +1,4 @@
-package xyz.junproject.backend.indexing
+package xyz.junproject.backend.domain
 
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test

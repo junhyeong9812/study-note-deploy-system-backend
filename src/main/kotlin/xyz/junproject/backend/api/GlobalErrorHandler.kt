@@ -1,4 +1,6 @@
-package xyz.junproject.backend.common
+package xyz.junproject.backend.api
+
+import xyz.junproject.backend.infra.RequestLog
 
 import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity

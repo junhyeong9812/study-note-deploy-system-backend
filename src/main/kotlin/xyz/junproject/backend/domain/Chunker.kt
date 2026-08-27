@@ -1,4 +1,4 @@
-package xyz.junproject.backend.indexing
+package xyz.junproject.backend.domain
 
 /**
  * md → 청크 분할 (es-index.md D1).
