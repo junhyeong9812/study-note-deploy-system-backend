@@ -1,4 +1,4 @@
-package xyz.junproject.backend.indexing
+package xyz.junproject.backend.infra
 
 import org.springframework.http.client.SimpleClientHttpRequestFactory
 import org.springframework.stereotype.Component

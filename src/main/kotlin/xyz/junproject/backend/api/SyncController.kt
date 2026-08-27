@@ -1,10 +1,12 @@
-package xyz.junproject.backend.sync
+package xyz.junproject.backend.api
+
+import xyz.junproject.backend.usecase.SyncService
 
 import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.*
-import xyz.junproject.backend.common.Envelope
-import xyz.junproject.backend.common.RequestLog
+import xyz.junproject.backend.api.Envelope
+import xyz.junproject.backend.infra.RequestLog
 
 data class SyncIn(val request_id: String? = null, val commit_sha: String? = null, val full: Boolean = false)
 

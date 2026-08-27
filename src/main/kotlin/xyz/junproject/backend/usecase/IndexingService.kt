@@ -1,9 +1,17 @@
-package xyz.junproject.backend.indexing
+package xyz.junproject.backend.usecase
+
+import xyz.junproject.backend.infra.EmbeddingClient
+
+import xyz.junproject.backend.infra.EsClient
+
+import xyz.junproject.backend.domain.DocClassifier
+
+import xyz.junproject.backend.domain.Chunker
 
 import org.springframework.stereotype.Service
 import tools.jackson.databind.ObjectMapper
-import xyz.junproject.backend.common.RequestLog
-import xyz.junproject.backend.sync.GitRepository
+import xyz.junproject.backend.infra.RequestLog
+import xyz.junproject.backend.infra.GitRepository
 import java.time.Instant
 
 /** 변경 파일 → 청킹 → 임베딩 → ES 색인. record-level 검증 포함 (es-index.md D5). */

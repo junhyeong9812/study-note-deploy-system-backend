@@ -1,4 +1,8 @@
-package xyz.junproject.backend.search
+package xyz.junproject.backend.usecase
+
+import xyz.junproject.backend.domain.RewriteOutcome
+import xyz.junproject.backend.domain.SearchHit
+import xyz.junproject.backend.infra.LlmClient
 
 import io.mockk.mockk
 import org.junit.jupiter.api.Assertions.*
@@ -38,9 +42,9 @@ class SearchServiceTest {
 
     @Test
     fun `임베딩 장애 시 BM25 단독으로 응답한다 - dense_used=false`() {
-        val embedding = mockk<xyz.junproject.backend.indexing.EmbeddingClient>()
+        val embedding = mockk<xyz.junproject.backend.infra.EmbeddingClient>()
         io.mockk.every { embedding.embedQuery(any()) } throws RuntimeException("down")
-        val es = mockk<xyz.junproject.backend.indexing.EsClient>()
+        val es = mockk<xyz.junproject.backend.infra.EsClient>()
         io.mockk.every { es.search(any()) } returns mapOf("hits" to mapOf("hits" to listOf(
             mapOf("_score" to 1.0, "_source" to mapOf(
                 "path" to "a.md", "chunk_no" to 0, "heading" to "h",

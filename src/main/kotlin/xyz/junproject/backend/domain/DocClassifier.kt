@@ -1,4 +1,4 @@
-package xyz.junproject.backend.indexing
+package xyz.junproject.backend.domain
 
 /** 경로·파일명 → 색인 필드 매핑 (es-index.md D2·D3). depth 2~4 편차를 규칙 하나로 흡수한다. */
 data class DocMeta(

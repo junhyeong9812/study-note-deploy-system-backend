@@ -1,4 +1,4 @@
-package xyz.junproject.backend.sync
+package xyz.junproject.backend.infra
 
 import org.springframework.stereotype.Component
 import java.io.File

@@ -1,8 +1,10 @@
-package xyz.junproject.backend.sync
+package xyz.junproject.backend.usecase
+
+import xyz.junproject.backend.infra.GitRepository
 
 import org.springframework.stereotype.Service
-import xyz.junproject.backend.common.RequestLog
-import xyz.junproject.backend.indexing.IndexingService
+import xyz.junproject.backend.infra.RequestLog
+import xyz.junproject.backend.usecase.IndexingService
 import java.io.File
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread

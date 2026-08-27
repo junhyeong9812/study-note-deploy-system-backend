@@ -1,10 +1,10 @@
-package xyz.junproject.backend.content
+package xyz.junproject.backend.api
 
 import io.mockk.every
 import io.mockk.mockk
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
-import xyz.junproject.backend.sync.GitRepository
+import xyz.junproject.backend.infra.GitRepository
 
 class ContentControllerTest {
     private val controller = ContentController(mockk(relaxed = true), mockk(relaxed = true))

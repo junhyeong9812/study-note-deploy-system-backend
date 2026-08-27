@@ -1,18 +1,12 @@
-package xyz.junproject.backend.search
+package xyz.junproject.backend.infra
+
+import xyz.junproject.backend.domain.RewriteOutcome
 
 import org.springframework.http.client.SimpleClientHttpRequestFactory
 import org.springframework.stereotype.Component
 import org.springframework.web.client.RestClient
-import xyz.junproject.backend.common.RequestLog
+import xyz.junproject.backend.infra.RequestLog
 import java.time.Duration
-
-data class RewriteOutcome(
-    val used: Boolean,
-    val keywords: List<String> = emptyList(),
-    val expanded: List<String> = emptyList(),
-    val topic: String? = null,
-    val docKind: String? = null,
-)
 
 /** llm wrapper /rewrite 호출 — 실패는 전부 "생략 폴백"(검색이 LLM에 인질로 잡히지 않는다). */
 @Component

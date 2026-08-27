@@ -1,4 +1,4 @@
-package xyz.junproject.backend.sync
+package xyz.junproject.backend.infra
 
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
