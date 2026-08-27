@@ -7,7 +7,7 @@ import org.junit.jupiter.api.Test
 import xyz.junproject.backend.infra.GitRepository
 
 class ContentControllerTest {
-    private val controller = ContentController(mockk(relaxed = true), mockk(relaxed = true))
+    private val controller = ContentController(mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true))
 
     @Test
     fun `경로 트래버설·비md·절대경로 거부`() {
@@ -24,7 +24,7 @@ class ContentControllerTest {
     fun `미존재 파일은 not_found 봉투 404`() {
         val git = mockk<GitRepository>(relaxed = true)
         every { git.readFile(any()) } throws java.io.FileNotFoundException("x")
-        val response = ContentController(git, mockk(relaxed = true)).getDoc("cs/none/2-summary.md", null)
+        val response = ContentController(git, mockk(relaxed = true), mockk(relaxed = true)).getDoc("cs/none/2-summary.md", null)
         assertEquals(404, response.statusCode.value())
         assertEquals(false, (response.body as Map<*, *>)["success"])
     }

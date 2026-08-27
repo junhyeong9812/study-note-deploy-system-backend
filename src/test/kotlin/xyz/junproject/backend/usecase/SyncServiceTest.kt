@@ -15,7 +15,7 @@ class SyncServiceTest {
         lastSha?.let { Files.writeString(stateFile, it) }
         // STATE_FILE은 env 기반이라 리플렉션 대신 임시 파일을 env로 못 주입 —
         // 생성 후 stateFile 필드를 교체한다 (테스트 한정).
-        val service = SyncService(mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true))
+        val service = SyncService(mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true))
         val field = SyncService::class.java.getDeclaredField("stateFile")
         field.isAccessible = true
         field.set(service, stateFile.toFile())
@@ -34,7 +34,7 @@ class SyncServiceTest {
         val git = mockk<GitRepository>()
         val gate = java.util.concurrent.CountDownLatch(1)
         every { git.syncToRemoteHead() } answers { gate.await(); "head99" }
-        val service = SyncService(git, mockk(relaxed = true), mockk(relaxed = true))
+        val service = SyncService(git, mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true))
         val field = SyncService::class.java.getDeclaredField("stateFile")
         field.isAccessible = true
         field.set(service, Files.createTempDirectory("t").resolve("s").toFile())
@@ -53,7 +53,7 @@ class SyncServiceTest {
         every { git.allMarkdown() } returns listOf("cs/x/2-summary.md")
         val indexing = mockk<IndexingService>(relaxed = true)
         every { indexing.indexPaths(any(), any(), any(), any()) } returns 3
-        val service = SyncService(git, indexing, mockk<RequestLog>(relaxed = true))
+        val service = SyncService(git, indexing, mockk(relaxed = true), mockk<RequestLog>(relaxed = true))
         val field = SyncService::class.java.getDeclaredField("stateFile")
         field.isAccessible = true
         field.set(service, Files.createTempDirectory("t").resolve("s").toFile())

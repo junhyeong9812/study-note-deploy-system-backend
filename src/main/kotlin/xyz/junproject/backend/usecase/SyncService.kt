@@ -19,6 +19,7 @@ import kotlin.concurrent.thread
 class SyncService(
     private val git: GitRepository,
     private val indexing: IndexingService,
+    private val tree: TreeService,
     private val requestLog: RequestLog,
 ) {
     private val stateFile = File(System.getenv("STATE_FILE") ?: "/data/study-note/last_sha")
@@ -83,6 +84,7 @@ class SyncService(
                 progress = "$done/$total"
             }
             if (effectiveFull) indexing.deleteStale(requestId, headSha)   // 고아 정리 (B7)
+            tree.rebuild(requestId, headSha)   // 트리는 sync 성공 시에만 변한다 (#12)
             writeLastSha(headSha)      // 전량 성공 후에만 전진 (D5-3)
             val tookMs = System.currentTimeMillis() - startedMs
             requestLog.log(requestId, "sync ok sha=$headSha files=${changes.size} chunks=$chunks ${tookMs}ms")

@@ -44,6 +44,8 @@ class GitRepository {
 
     fun readFile(path: String): String = File(repoDir, path).readText()
 
+    fun currentHead(): String = run("git", "rev-parse", "HEAD").trim()
+
     private fun run(vararg command: String, workDir: File = repoDir): String {
         val process = ProcessBuilder(*command).directory(workDir).redirectErrorStream(true).start()
         // 출력 소비를 별도 스레드로 — 프로세스 행 시 readText가 waitFor 이전에 무한 블록하는 것 방지 (B8)
