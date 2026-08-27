@@ -11,7 +11,20 @@ import xyz.junproject.backend.infra.GitRepository
 /** 콘텐츠 API — 문서 목록·원문. 렌더는 front 책임(설계: backend는 콘텐츠 JSON만). */
 @RestController
 @RequestMapping("/api")
-class ContentController(private val git: GitRepository, private val requestLog: RequestLog) {
+class ContentController(
+    private val git: GitRepository,
+    private val treeService: xyz.junproject.backend.usecase.TreeService,
+    private val requestLog: RequestLog,
+) {
+
+    @GetMapping("/tree")
+    fun tree(@RequestHeader("X-Request-Id", required = false) incomingId: String?):
+            ResponseEntity<Map<String, Any?>> {
+        val requestId = requestLog.acceptOrIssue(incomingId)
+        val cached = treeService.get(requestId)
+        return ResponseEntity.ok(Envelope.ok(mapOf(
+            "commit_sha" to cached.commitSha, "tree" to cached.tree)))
+    }
 
     @GetMapping("/docs")
     fun listDocs(@RequestHeader("X-Request-Id", required = false) incomingId: String?):
