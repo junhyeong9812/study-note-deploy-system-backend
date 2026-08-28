@@ -31,7 +31,7 @@
 
 | 파일명 | kind | 비고 |
 |---|---|---|
-| 1-question.md / 2-summary.md / 3-answer.md | question/summary/answer (form=chapter) | 학습 3종. 2-summary 부재 허용(코테) |
+| 1-question.md / 2-summary.md / 3-answer.md | question/summary/answer (form=chapter) | 학습 3종. 부재 = "미작성" 허용 — 코테 2-summary는 추후 문제 분석으로 작성 예정(2026-08-28 확정), 의도된 영구 부재가 아님 |
 | problem.md / analyze.md | question/answer (과거 호환 매핑) | 통일 rename 후 소멸 예정 |
 | index.md / README.md | index/readme | 목차·규칙 |
 | **그 외 전부** | `post` (form=post) | 세미나·evidence·guide — 블로그형 단일 기록 |
