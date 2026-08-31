@@ -20,6 +20,8 @@ class TreeBuilderTest {
         assertTrue(lsmTree.isSubject)                                     // 리프 폴더 = 주제
         assertEquals(2, lsmTree.docs.size)
         assertEquals("cs/systems/lsm-tree", lsmTree.path)
+        assertEquals("cs/systems", lsmTree.prev)                          // #22 뒤로가기 링크
+        assertEquals(null, tree.prev)
         val heap = tree.children.first { it.name == "practice" }
             .children.first().children.first { it.name == "힙" }
         assertFalse(heap.isSubject)                                       // 하위 폴더가 있으면 주제 아님

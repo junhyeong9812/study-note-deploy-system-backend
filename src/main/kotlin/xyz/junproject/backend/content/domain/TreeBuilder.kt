@@ -19,6 +19,7 @@ object TreeBuilder {
     data class Node(
         val name: String,
         val path: String,                       // repo 상대 폴더 경로 ("" = 루트)
+        val prev: String?,                      // 상위 폴더 경로 — 루트는 null (#22: front 뒤로가기용)
         val docs: List<DocRef>,                 // 이 폴더 직속 문서
         val children: List<Node>,               // 하위 폴더 (이름순)
     ) {
@@ -28,10 +29,10 @@ object TreeBuilder {
 
     fun build(paths: List<String>): Node {
         val metas = paths.map { DocClassifier.classify(it) }
-        return buildNode(name = "", path = "", metas = metas, depth = 0)
+        return buildNode(name = "", path = "", prev = null, metas = metas, depth = 0)
     }
 
-    private fun buildNode(name: String, path: String, metas: List<DocMeta>, depth: Int): Node {
+    private fun buildNode(name: String, path: String, prev: String?, metas: List<DocMeta>, depth: Int): Node {
         val (direct, deeper) = metas.partition { it.topicPath.size == depth }
         val docs = direct.sortedBy { it.path }
             .map { DocRef(it.path, it.docKind, it.form) }
@@ -39,8 +40,8 @@ object TreeBuilder {
             .toSortedMap()
             .map { (childName, childMetas) ->
                 val childPath = if (path.isEmpty()) childName else "$path/$childName"
-                buildNode(childName, childPath, childMetas, depth + 1)
+                buildNode(childName, childPath, prev = path, metas = childMetas, depth = depth + 1)
             }
-        return Node(name, path, docs, children)
+        return Node(name, path, prev, docs, children)
     }
 }

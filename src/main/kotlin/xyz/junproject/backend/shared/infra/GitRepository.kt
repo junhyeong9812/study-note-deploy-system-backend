@@ -2,6 +2,7 @@ package xyz.junproject.backend.shared.infra
 
 import xyz.junproject.backend.indexing.usecase.DocumentReader
 
+import xyz.junproject.backend.content.usecase.CommitInfo
 import xyz.junproject.backend.content.usecase.NoteSourcePort
 
 import xyz.junproject.backend.sync.usecase.ShaUnresolvableException
@@ -51,6 +52,20 @@ class GitRepository : SourceControlPort, NoteSourcePort, DocumentReader {
     override fun readFile(path: String): String = File(repoDir, path).readText()
 
     override fun currentHead(): String = run("git", "rev-parse", "HEAD").trim()
+
+    override fun recentCommits(limit: Int): List<CommitInfo> =
+        run("git", "log", "--pretty=%H%x09%cI%x09%s", "-n", limit.toString())
+            .lines().filter { it.isNotBlank() }.map { line ->
+                val parts = line.split("\t", limit = 3)
+                CommitInfo(sha = parts[0], at = parts.getOrElse(1) { "" }, message = parts.getOrElse(2) { "" })
+            }
+
+    override fun readFileAt(sha: String, path: String): String =
+        try {
+            run("git", "-c", "core.quotepath=off", "show", "$sha:$path")
+        } catch (error: IllegalStateException) {
+            throw java.io.FileNotFoundException("$sha:$path")   // 부재·잘못된 sha → 404 계약
+        }
 
     private fun run(vararg command: String, workDir: File = repoDir): String {
         val process = ProcessBuilder(*command).directory(workDir).redirectErrorStream(true).start()

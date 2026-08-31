@@ -42,8 +42,18 @@ class ContentController(
         return ResponseEntity.ok(Envelope.ok(mapOf("count" to docs.size, "docs" to docs)))
     }
 
+    @GetMapping("/history")
+    fun history(@RequestHeader("X-Request-Id", required = false) incomingId: String?):
+            ResponseEntity<Map<String, Any?>> {
+        val requestId = requestLog.acceptOrIssue(incomingId)
+        val commits = git.recentCommits(30)
+        requestLog.log(requestId, "history ${commits.size} commits")
+        return ResponseEntity.ok(Envelope.ok(mapOf("commits" to commits)))
+    }
+
     @GetMapping("/doc")
     fun getDoc(@RequestParam path: String,
+               @RequestParam(required = false) at: String?,
                @RequestHeader("X-Request-Id", required = false) incomingId: String?):
             ResponseEntity<Map<String, Any?>> {
         val requestId = requestLog.acceptOrIssue(incomingId)
@@ -52,8 +62,12 @@ class ContentController(
             return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
                 .body(Envelope.fail("invalid_request", detail = "path must be a repo-relative .md"))
         }
+        if (at != null && !at.matches(Regex("^[0-9a-f]{7,64}$"))) {   // 시점 조회 — hex만 (주입 차단)
+            return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
+                .body(Envelope.fail("invalid_request", detail = "at must be a commit sha"))
+        }
         val content = try {
-            git.readFile(path)
+            if (at != null) git.readFileAt(at, path) else git.readFile(path)
         } catch (_: java.io.FileNotFoundException) {           // 부재만 404 — I/O 장애는 전역 500 봉투로
             requestLog.log(requestId, "doc not found: $path", "warning")
             return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Envelope.fail("not_found"))
@@ -62,10 +76,11 @@ class ContentController(
             return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Envelope.fail("not_found"))
         }
         val meta = DocClassifier.classify(path)
-        requestLog.log(requestId, "doc ok $path ${content.length}chars")
+        requestLog.log(requestId, "doc ok $path ${content.length}chars${if (at != null) " at=$at" else ""}")
         return ResponseEntity.ok(Envelope.ok(mapOf(
             "path" to meta.path, "topic" to meta.topic, "subject" to meta.subject,
             "doc_kind" to meta.docKind, "form" to meta.form, "markdown" to content,
+            "at" to at,
         )))
     }
 
