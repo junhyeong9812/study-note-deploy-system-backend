@@ -24,7 +24,7 @@ class ContentControllerTest {
     fun `미존재 파일은 not_found 봉투 404`() {
         val git = mockk<NoteSourcePort>(relaxed = true)
         every { git.readFile(any()) } throws java.io.FileNotFoundException("x")
-        val response = ContentController(git, mockk(relaxed = true), mockk(relaxed = true)).getDoc("cs/none/2-summary.md", null)
+        val response = ContentController(git, mockk(relaxed = true), mockk(relaxed = true)).getDoc("cs/none/2-summary.md", null, null)
         assertEquals(404, response.statusCode.value())
         assertEquals(false, (response.body as Map<*, *>)["success"])
     }
