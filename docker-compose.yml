@@ -9,6 +9,7 @@ services:
       ES_URL: http://elasticsearch:9200
       EMBEDDING_URL: http://embedding:8080
       LLM_URL: ${LLM_URL:?set-in-env}          # .164 wrapper (배포 .env — repo에 IP 금지)
+      CLAUDE_BRIDGE_URL: ${CLAUDE_BRIDGE_URL:-} # 에스컬레이션 브리지(PC 역터널+socat) — 비우면 escalate_unavailable
       LOG_REDIS_URL: redis://redis:6379
       SERVER_NAME: backend
       SYNC_SECRET: ${SYNC_SECRET:?set-in-env}
