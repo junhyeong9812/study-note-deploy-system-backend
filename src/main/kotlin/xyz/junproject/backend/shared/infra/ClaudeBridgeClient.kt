@@ -11,6 +11,7 @@ import java.time.Duration
 @Component
 class ClaudeBridgeClient(private val objectMapper: tools.jackson.databind.ObjectMapper) : EscalatePort {
     private val bridgeUrl = System.getenv("CLAUDE_BRIDGE_URL") ?: ""
+    private val bridgeSecret = System.getenv("BRIDGE_SECRET") ?: ""
     override val available: Boolean get() = bridgeUrl.isNotBlank()
 
     private val client by lazy {
@@ -29,6 +30,7 @@ class ClaudeBridgeClient(private val objectMapper: tools.jackson.databind.Object
         val response = client.post().uri("/ask")
             .header("Content-Type", "application/json; charset=utf-8")
             .header("X-Request-Id", requestId)
+            .header("X-Bridge-Secret", bridgeSecret)
             .body(payload)
             .retrieve().body(Map::class.java) ?: error("bridge: empty response")
         return response["answer"] as? String ?: error("bridge: no answer field")
