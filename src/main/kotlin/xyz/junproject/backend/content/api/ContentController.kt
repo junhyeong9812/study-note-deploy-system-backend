@@ -84,8 +84,6 @@ class ContentController(
         )))
     }
 
-    /** 경로 트래버설 차단 — repo 상대 .md 경로만 허용 */
     internal fun isSafe(path: String): Boolean =
-        path.endsWith(".md") && !path.startsWith("/") && !path.startsWith("~") &&
-        !path.split("/").any { it == ".." || it == ".git" } && path.isNotBlank()
+        xyz.junproject.backend.content.domain.PathGuard.isSafeMarkdownPath(path)
 }
