@@ -2,6 +2,7 @@ package xyz.junproject.backend.shared.infra
 
 import xyz.junproject.backend.indexing.usecase.DocumentReader
 
+import xyz.junproject.backend.content.domain.PathGuard
 import xyz.junproject.backend.content.usecase.CommitInfo
 import xyz.junproject.backend.content.usecase.NoteSourcePort
 
@@ -43,11 +44,13 @@ class GitRepository : SourceControlPort, NoteSourcePort, DocumentReader {
                 throw ShaUnresolvableException("prev=$prevSha (shallow 경계 밖 추정)")
             else throw error
         }
-        return parseNameStatus(output)
+        // denylist(docs·templates)는 색인·트리 입력에서 제외 (PathGuard.HIDDEN_TOP_LEVEL)
+        return parseNameStatus(output).filter { !PathGuard.isHidden(it.second) }
     }
 
     override fun allMarkdown(): List<String> =
-        run("git", "-c", "core.quotepath=off", "ls-files", "*.md").lines().filter { it.isNotBlank() }
+        run("git", "-c", "core.quotepath=off", "ls-files", "*.md").lines()
+            .filter { it.isNotBlank() && !PathGuard.isHidden(it) }
 
     override fun readFile(path: String): String = File(repoDir, path).readText()
 
