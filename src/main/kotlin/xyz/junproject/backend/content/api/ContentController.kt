@@ -62,6 +62,10 @@ class ContentController(
             return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
                 .body(Envelope.fail("invalid_request", detail = "path must be a repo-relative .md"))
         }
+        if (xyz.junproject.backend.content.domain.PathGuard.isHidden(path)) {   // denylist는 존재 은닉(404)
+            requestLog.log(requestId, "doc hidden: $path", "warning")
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Envelope.fail("not_found"))
+        }
         if (at != null && !at.matches(Regex("^[0-9a-f]{7,64}$"))) {   // 시점 조회 — hex만 (주입 차단)
             return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
                 .body(Envelope.fail("invalid_request", detail = "at must be a commit sha"))

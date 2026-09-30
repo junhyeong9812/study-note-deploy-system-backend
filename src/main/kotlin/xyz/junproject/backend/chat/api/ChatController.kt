@@ -42,7 +42,8 @@ class ChatController(private val chatService: ChatService, private val requestLo
         val requestId = requestLog.acceptOrIssue(incomingId)
         val docPath = body.doc_path ?: ""
         val question = body.question?.trim() ?: ""
-        if (!PathGuard.isSafeMarkdownPath(docPath) || question.isEmpty() || question.length > 2000) {
+        if (!PathGuard.isSafeMarkdownPath(docPath) || PathGuard.isHidden(docPath) ||
+            question.isEmpty() || question.length > 2000) {
             return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
                 .body(Envelope.fail("invalid_request", detail = "doc_path(.md)·question(1~2000자)"))
         }
@@ -67,7 +68,7 @@ class ChatController(private val chatService: ChatService, private val requestLo
     fun history(@RequestParam doc_path: String,
                 request: HttpServletRequest, response: HttpServletResponse):
             ResponseEntity<Map<String, Any?>> {
-        if (!PathGuard.isSafeMarkdownPath(doc_path)) {
+        if (!PathGuard.isSafeMarkdownPath(doc_path) || PathGuard.isHidden(doc_path)) {
             return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
                 .body(Envelope.fail("invalid_request"))
         }
@@ -85,7 +86,7 @@ class ChatController(private val chatService: ChatService, private val requestLo
         val requestId = requestLog.acceptOrIssue(incomingId)
         val docPath = body.doc_path ?: ""
         val question = body.question?.trim() ?: ""
-        if (!PathGuard.isSafeMarkdownPath(docPath) || question.isEmpty()) {
+        if (!PathGuard.isSafeMarkdownPath(docPath) || PathGuard.isHidden(docPath) || question.isEmpty()) {
             return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
                 .body(Envelope.fail("invalid_request"))
         }
