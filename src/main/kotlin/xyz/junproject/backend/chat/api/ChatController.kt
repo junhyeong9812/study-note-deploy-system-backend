@@ -8,7 +8,11 @@ import org.springframework.http.MediaType
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.*
 import org.springframework.web.servlet.mvc.method.annotation.ResponseBodyEmitter
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter
+import tools.jackson.databind.ObjectMapper
+import xyz.junproject.backend.chat.usecase.ChatEvent
 import xyz.junproject.backend.chat.usecase.ChatService
+import xyz.junproject.backend.chat.usecase.LlmUnreachable
 import xyz.junproject.backend.content.domain.PathGuard
 import xyz.junproject.backend.shared.api.Envelope
 import xyz.junproject.backend.shared.infra.RequestLog
@@ -20,9 +24,11 @@ data class ChatIn(val doc_path: String? = null, val question: String? = null)
 /** 채팅 API — 세션 쿠키(id만, HttpOnly) 발급/검증은 여기(중앙 발급 규약). 스트림은 MVC 비동기. */
 @RestController
 @RequestMapping("/api/chat")
-class ChatController(private val chatService: ChatService, private val requestLog: RequestLog) {
+class ChatController(private val chatService: ChatService, private val requestLog: RequestLog,
+                     private val objectMapper: ObjectMapper) {
 
-    private val streamExecutor = Executors.newFixedThreadPool(3)   // llm 세마포어(2)와 정렬 (비교 문서 §4)
+    // 가상 스레드 — 대기열에 선 연결(최대 2+8)을 플랫폼 스레드 없이 붙잡는다. 동시 수 상한은 llm 대기열이 소유
+    private val streamExecutor = Executors.newVirtualThreadPerTaskExecutor()
     private val sessionPattern = Regex("^[0-9a-f-]{36}$")
 
     private fun sessionOf(request: HttpServletRequest, response: HttpServletResponse): String {
@@ -35,30 +41,80 @@ class ChatController(private val chatService: ChatService, private val requestLo
         return issued
     }
 
-    @PostMapping(produces = [MediaType.TEXT_PLAIN_VALUE])
+    /** 클라이언트가 떠나 전송이 실패함 — 오류가 아니라 스트림을 접는 신호 */
+    private class ClientGone(cause: Throwable) : RuntimeException(cause)
+
+    @PostMapping
     fun chat(@RequestBody body: ChatIn,
              request: HttpServletRequest, response: HttpServletResponse,
-             @RequestHeader("X-Request-Id", required = false) incomingId: String?): Any {
+             @RequestHeader("X-Request-Id", required = false) incomingId: String?,
+             @RequestHeader("Accept", required = false) accept: String?): Any {
         val requestId = requestLog.acceptOrIssue(incomingId)
         val docPath = body.doc_path ?: ""
         val question = body.question?.trim() ?: ""
         if (!PathGuard.isSafeMarkdownPath(docPath) || PathGuard.isHidden(docPath) ||
             question.isEmpty() || question.length > 2000) {
             return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
+                .contentType(MediaType.APPLICATION_JSON)
                 .body(Envelope.fail("invalid_request", detail = "doc_path(.md)·question(1~2000자)"))
         }
         val sessionId = sessionOf(request, response)
-        val emitter = ResponseBodyEmitter(180_000L)
+        return if (accept?.contains(MediaType.TEXT_EVENT_STREAM_VALUE) == true)
+            chatEvents(requestId, sessionId, docPath, question, response)
+        else chatPlainText(requestId, sessionId, docPath, question)
+    }
+
+    /** SSE — 대기(queued)·시작·토큰·오류·완료를 이벤트로. 오류도 이벤트다(본문에 글자를 섞지 않는다). */
+    private fun chatEvents(requestId: String, sessionId: String, docPath: String, question: String,
+                           response: HttpServletResponse): SseEmitter {
+        response.setHeader("X-Accel-Buffering", "no")     // 엣지 nginx가 이벤트를 모아두지 않게
+        response.setHeader("Cache-Control", "no-store")
+        val emitter = SseEmitter(180_000L)
+        fun send(event: ChatEvent) {
+            try {
+                emitter.send(SseEmitter.event().name(event.name)
+                    .data(objectMapper.writeValueAsString(event.payload)))
+            } catch (error: Exception) {
+                throw ClientGone(error)
+            }
+        }
         streamExecutor.execute {
             try {
-                chatService.chat(requestId, sessionId, docPath, question) { token ->
-                    emitter.send(token, MediaType.TEXT_PLAIN)
+                chatService.chat(requestId, sessionId, docPath, question, ::send)
+                emitter.complete()
+            } catch (gone: ClientGone) {
+                // 던져진 예외가 llm 스트림을 닫는다 → llm이 대기 자리·생성 슬롯을 반납
+                requestLog.log(requestId, "chat client gone")
+                emitter.completeWithError(gone)
+            } catch (error: Exception) {
+                val code = if (error is LlmUnreachable) "llm_unreachable" else "internal"
+                requestLog.log(requestId, "chat failed($code): ${error.message?.take(150)}", "error")
+                runCatching { send(ChatEvent.Error(code)) }
+                emitter.complete()                // complete 누락 = 연결·스레드 누수 (비교 문서 §4)
+            }
+        }
+        return emitter
+    }
+
+    /** 구 계약(text/plain 청크) — SSE를 요청하지 않는 구 front용. 토큰만 흘리고 오류는 기존 문구. */
+    private fun chatPlainText(requestId: String, sessionId: String, docPath: String,
+                              question: String): ResponseBodyEmitter {
+        val emitter = ResponseBodyEmitter(180_000L)
+        val failureText = "\n[오류] 응답 생성에 실패했습니다. 잠시 후 다시 시도해주세요."
+        streamExecutor.execute {
+            try {
+                chatService.chat(requestId, sessionId, docPath, question) { event ->
+                    when (event) {
+                        is ChatEvent.Token -> emitter.send(event.text, MediaType.TEXT_PLAIN)
+                        is ChatEvent.Error -> emitter.send(failureText, MediaType.TEXT_PLAIN)
+                        else -> Unit
+                    }
                 }
                 emitter.complete()
             } catch (error: Exception) {
                 requestLog.log(requestId, "chat failed: ${error.message?.take(150)}", "error")
-                runCatching { emitter.send("\n[오류] 응답 생성에 실패했습니다. 잠시 후 다시 시도해주세요.") }
-                emitter.completeWithError(error)   // complete 누락 = 연결·스레드 누수 (비교 문서 §4)
+                runCatching { emitter.send(failureText, MediaType.TEXT_PLAIN) }
+                emitter.completeWithError(error)
             }
         }
         return emitter

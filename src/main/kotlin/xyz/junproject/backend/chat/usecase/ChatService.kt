@@ -55,18 +55,35 @@ class ChatService(
         }
     }
 
-    /** 스트리밍 응답 — 토큰을 onToken으로 흘리고, 완료 후 이력 기록 */
+    /** 스트리밍 응답 — llm 이벤트를 onEvent로 그대로 흘린다.
+     * 이력은 답변이 정상 완료(Done)된 경우에만 남긴다 — 대기 중 이탈·오류는 기록하지 않는다. */
     fun chat(requestId: String, sessionId: String, docPath: String, question: String,
-             onToken: (String) -> Unit) {
+             onEvent: (ChatEvent) -> Unit) {
         val messages = buildMessages(docPath, history(sessionId, docPath), question)
         val answer = StringBuilder()
-        chatStream.stream(requestId, messages) { token ->
-            answer.append(token)
-            onToken(token)
+        var completed = false
+        var failure: String? = null
+        var queuedLogged = false
+        chatStream.stream(requestId, messages) { event ->
+            when (event) {
+                is ChatEvent.Token -> answer.append(event.text)
+                is ChatEvent.Done -> completed = true
+                is ChatEvent.Error -> failure = event.code
+                is ChatEvent.Queued -> if (!queuedLogged) {      // 재전송(heartbeat)마다 남기지 않는다
+                    queuedLogged = true
+                    requestLog.log(requestId, "chat queued position=${event.position}")
+                }
+                is ChatEvent.Start -> Unit
+            }
+            onEvent(event)
         }
-        append(sessionId, docPath, ChatMessage("user", question))
-        append(sessionId, docPath, ChatMessage("assistant", answer.toString()))
-        requestLog.log(requestId, "chat ok $docPath q=${question.take(30)} answer=${answer.length}chars")
+        if (completed) {
+            append(sessionId, docPath, ChatMessage("user", question))
+            append(sessionId, docPath, ChatMessage("assistant", answer.toString()))
+            requestLog.log(requestId, "chat ok $docPath q=${question.take(30)} answer=${answer.length}chars")
+        } else {
+            requestLog.log(requestId, "chat ended without answer: ${failure ?: "no terminal event"}", "warning")
+        }
     }
 
     /** 에스컬레이션 — Claude 브리지(수동 트리거). 전체 문서+이력+질문을 프롬프트로 */
