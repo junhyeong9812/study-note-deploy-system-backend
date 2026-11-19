@@ -3,6 +3,9 @@ server:
 spring:
   application:
     name: backend
+  threads:
+    virtual:
+      enabled: true   # 요청 처리 스레드를 가상 스레드로 — 대기 중인 채팅 연결을 싸게 붙잡는다
   data:
     redis:
       url: ${LOG_REDIS_URL:redis://redis:6379}   # 미지정 시 Spring 기본 localhost = 컨테이너 자신 (함정)
