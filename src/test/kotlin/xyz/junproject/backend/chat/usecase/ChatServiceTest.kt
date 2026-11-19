@@ -64,4 +64,15 @@ class ChatServiceTest {
         assertThrows(LlmUnreachable::class.java) { service.chat("req-1", "s", "cs/a.md", "q") {} }
         verify(exactly = 0) { listOperations.rightPush(any(), any<String>()) }
     }
+
+    @Test
+    fun `완료 후 마지막 전달이 실패해도 완성된 답은 이력에 남긴다`() {
+        val service = serviceEmitting(ChatEvent.Start, ChatEvent.Token("완성"), ChatEvent.Done)
+        assertThrows(IllegalStateException::class.java) {
+            service.chat("req-1", "session", "cs/a.md", "질문") { event ->
+                if (event is ChatEvent.Done) throw IllegalStateException("client gone")
+            }
+        }
+        verify(exactly = 1) { listOperations.rightPush("chat:session:cs/a.md", match { it.contains("완성") }) }
+    }
 }

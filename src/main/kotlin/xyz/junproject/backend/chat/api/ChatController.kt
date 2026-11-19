@@ -18,6 +18,7 @@ import xyz.junproject.backend.shared.api.Envelope
 import xyz.junproject.backend.shared.infra.RequestLog
 import java.util.UUID
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 data class ChatIn(val doc_path: String? = null, val question: String? = null)
 
@@ -29,6 +30,15 @@ class ChatController(private val chatService: ChatService, private val requestLo
 
     // 가상 스레드 — 대기열에 선 연결(최대 2+8)을 플랫폼 스레드 없이 붙잡는다. 동시 수 상한은 llm 대기열이 소유
     private val streamExecutor = Executors.newVirtualThreadPerTaskExecutor()
+    private val keepAliveScheduler = Executors.newSingleThreadScheduledExecutor { task ->
+        Thread(task, "chat-sse-keep-alive").apply { isDaemon = true }
+    }
+
+    private companion object {
+        const val KEEP_ALIVE_SECONDS = 15L
+        // 한글이 변환기 기본 문자셋(ISO-8859-1)에 깨지지 않게 문자셋을 명시한다
+        val UTF8_TEXT = MediaType("text", "plain", Charsets.UTF_8)
+    }
     private val sessionPattern = Regex("^[0-9a-f-]{36}$")
 
     private fun sessionOf(request: HttpServletRequest, response: HttpServletResponse): String {
@@ -69,15 +79,23 @@ class ChatController(private val chatService: ChatService, private val requestLo
                            response: HttpServletResponse): SseEmitter {
         response.setHeader("X-Accel-Buffering", "no")     // 엣지 nginx가 이벤트를 모아두지 않게
         response.setHeader("Cache-Control", "no-store")
+        response.characterEncoding = "UTF-8"              // 한글 토큰이 응답 기본 문자셋에 깨지지 않게
         val emitter = SseEmitter(180_000L)
         fun send(event: ChatEvent) {
             try {
                 emitter.send(SseEmitter.event().name(event.name)
-                    .data(objectMapper.writeValueAsString(event.payload)))
+                    .data(objectMapper.writeValueAsString(event.payload), UTF8_TEXT))
             } catch (error: Exception) {
                 throw ClientGone(error)
             }
         }
+        // 이벤트 사이가 길어져도(대기·첫 토큰 전) 엣지 프록시의 무응답 제한(60s)에 끊기지 않게 주석 줄을 흘린다
+        val keepAlive = keepAliveScheduler.scheduleAtFixedRate(
+            { runCatching { emitter.send(SseEmitter.event().comment("keep-alive")) } },
+            KEEP_ALIVE_SECONDS, KEEP_ALIVE_SECONDS, TimeUnit.SECONDS)
+        emitter.onCompletion { keepAlive.cancel(false) }
+        emitter.onTimeout { keepAlive.cancel(false) }
+        emitter.onError { keepAlive.cancel(false) }
         streamExecutor.execute {
             try {
                 chatService.chat(requestId, sessionId, docPath, question, ::send)
@@ -105,15 +123,15 @@ class ChatController(private val chatService: ChatService, private val requestLo
             try {
                 chatService.chat(requestId, sessionId, docPath, question) { event ->
                     when (event) {
-                        is ChatEvent.Token -> emitter.send(event.text, MediaType.TEXT_PLAIN)
-                        is ChatEvent.Error -> emitter.send(failureText, MediaType.TEXT_PLAIN)
+                        is ChatEvent.Token -> emitter.send(event.text, UTF8_TEXT)
+                        is ChatEvent.Error -> emitter.send(failureText, UTF8_TEXT)
                         else -> Unit
                     }
                 }
                 emitter.complete()
             } catch (error: Exception) {
                 requestLog.log(requestId, "chat failed: ${error.message?.take(150)}", "error")
-                runCatching { emitter.send(failureText, MediaType.TEXT_PLAIN) }
+                runCatching { emitter.send(failureText, UTF8_TEXT) }
                 emitter.completeWithError(error)
             }
         }

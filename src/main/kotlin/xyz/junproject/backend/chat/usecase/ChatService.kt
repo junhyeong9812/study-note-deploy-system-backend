@@ -63,25 +63,25 @@ class ChatService(
         val answer = StringBuilder()
         var completed = false
         var failure: String? = null
-        var queuedLogged = false
-        chatStream.stream(requestId, messages) { event ->
-            when (event) {
-                is ChatEvent.Token -> answer.append(event.text)
-                is ChatEvent.Done -> completed = true
-                is ChatEvent.Error -> failure = event.code
-                is ChatEvent.Queued -> if (!queuedLogged) {      // 재전송(heartbeat)마다 남기지 않는다
-                    queuedLogged = true
-                    requestLog.log(requestId, "chat queued position=${event.position}")
+        try {
+            chatStream.stream(requestId, messages) { event ->
+                when (event) {
+                    is ChatEvent.Token -> answer.append(event.text)
+                    is ChatEvent.Done -> completed = true
+                    is ChatEvent.Error -> failure = event.code
+                    is ChatEvent.Queued, is ChatEvent.Start -> Unit   // 대기 로그는 대기열 소유자(llm)가 남긴다
                 }
-                is ChatEvent.Start -> Unit
+                onEvent(event)
             }
-            onEvent(event)
+        } finally {
+            // 완료 기준은 llm의 done — 마지막 전달이 실패(브라우저 이탈)해도 완성된 답은 남긴다
+            if (completed) {
+                append(sessionId, docPath, ChatMessage("user", question))
+                append(sessionId, docPath, ChatMessage("assistant", answer.toString()))
+                requestLog.log(requestId, "chat ok $docPath q=${question.take(30)} answer=${answer.length}chars")
+            }
         }
-        if (completed) {
-            append(sessionId, docPath, ChatMessage("user", question))
-            append(sessionId, docPath, ChatMessage("assistant", answer.toString()))
-            requestLog.log(requestId, "chat ok $docPath q=${question.take(30)} answer=${answer.length}chars")
-        } else {
+        if (!completed) {
             requestLog.log(requestId, "chat ended without answer: ${failure ?: "no terminal event"}", "warning")
         }
     }
