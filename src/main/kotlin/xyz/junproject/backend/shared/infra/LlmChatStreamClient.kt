@@ -23,6 +23,7 @@ class LlmChatStreamClient(
     private val objectMapper: ObjectMapper,
     private val llmUrl: String,
     private val idleLimit: Duration,      // 본문에서 이 시간 동안 한 줄도 안 오면 llm이 멈춘 것으로 본다
+    private val headerTimeout: Duration = Duration.ofSeconds(30),   // 응답 헤더까지 — 대기열도 헤더는 즉시 보낸다
 ) : ChatStreamPort {
 
     // 유휴 상한 150s — llm이 Ollama를 기다리는 한도(read 120s)보다 길게: llm이 스스로 오류를 낼 시간을 준다
@@ -52,7 +53,7 @@ class LlmChatStreamClient(
         val body = objectMapper.writeValueAsString(
             mapOf("request_id" to requestId, "messages" to messages))
         val request = HttpRequest.newBuilder(URI.create("$llmUrl/chat"))
-            .timeout(Duration.ofSeconds(30))           // 응답 헤더까지 — 대기열도 헤더는 즉시 보낸다
+            .timeout(headerTimeout)
             .header("Content-Type", "application/json")
             .header("Accept", "application/x-ndjson")
             .POST(HttpRequest.BodyPublishers.ofString(body))
@@ -87,7 +88,7 @@ class LlmChatStreamClient(
                     if (event is ChatEvent.Done || event is ChatEvent.Error) finished = true
                 }
             } catch (_: IOException) {
-                // 응답 도중 끊김·유휴 상한 초과(감시가 스트림을 닫음) — 아래에서 오류 이벤트로 끝낸다
+                // 응답 도중 끊김·유휴 상한 초과(감시가 스트림을 닫음)·호출부의 중단 신호 — 아래에서 오류 이벤트로 끝낸다
             } finally {
                 pendingIdleClose?.cancel(false)
             }

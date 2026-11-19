@@ -17,8 +17,10 @@ import xyz.junproject.backend.content.domain.PathGuard
 import xyz.junproject.backend.shared.api.Envelope
 import xyz.junproject.backend.shared.infra.RequestLog
 import java.util.UUID
+import java.util.concurrent.CancellationException
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 data class ChatIn(val doc_path: String? = null, val question: String? = null)
 
@@ -89,14 +91,24 @@ class ChatController(private val chatService: ChatService, private val requestLo
                 throw ClientGone(error)
             }
         }
+        // 브라우저가 떠난 걸 알게 되면 스트림 작업을 깨운다 — llm 읽기가 끊기며 대기 자리·생성 슬롯이 반납된다.
+        // (토큰이 안 오는 구간에는 전송 실패로 알 기회가 keep-alive뿐이다)
+        val streamWorker = AtomicReference<Thread>()
+        fun stopStreamWorker() { streamWorker.get()?.interrupt() }
         // 이벤트 사이가 길어져도(대기·첫 토큰 전) 엣지 프록시의 무응답 제한(60s)에 끊기지 않게 주석 줄을 흘린다
-        val keepAlive = keepAliveScheduler.scheduleAtFixedRate(
-            { runCatching { emitter.send(SseEmitter.event().comment("keep-alive")) } },
-            KEEP_ALIVE_SECONDS, KEEP_ALIVE_SECONDS, TimeUnit.SECONDS)
+        val keepAlive = keepAliveScheduler.scheduleAtFixedRate({
+            try {
+                emitter.send(SseEmitter.event().comment("keep-alive"))
+            } catch (_: Exception) {
+                stopStreamWorker()
+                throw CancellationException("client gone")   // 예외로 끝내면 이 주기 작업은 다시 돌지 않는다
+            }
+        }, KEEP_ALIVE_SECONDS, KEEP_ALIVE_SECONDS, TimeUnit.SECONDS)
         emitter.onCompletion { keepAlive.cancel(false) }
-        emitter.onTimeout { keepAlive.cancel(false) }
-        emitter.onError { keepAlive.cancel(false) }
+        emitter.onTimeout { keepAlive.cancel(false); stopStreamWorker() }
+        emitter.onError { keepAlive.cancel(false); stopStreamWorker() }
         streamExecutor.execute {
+            streamWorker.set(Thread.currentThread())
             try {
                 chatService.chat(requestId, sessionId, docPath, question, ::send)
                 emitter.complete()
@@ -109,6 +121,9 @@ class ChatController(private val chatService: ChatService, private val requestLo
                 requestLog.log(requestId, "chat failed($code): ${error.message?.take(150)}", "error")
                 runCatching { send(ChatEvent.Error(code)) }
                 emitter.complete()                // complete 누락 = 연결·스레드 누수 (비교 문서 §4)
+            } finally {
+                streamWorker.set(null)            // 끝난 뒤 늦게 온 신호가 다른 작업을 깨우지 않게
+                Thread.interrupted()
             }
         }
         return emitter

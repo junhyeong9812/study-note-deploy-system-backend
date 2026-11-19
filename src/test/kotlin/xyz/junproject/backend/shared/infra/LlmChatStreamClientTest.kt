@@ -102,4 +102,45 @@ class LlmChatStreamClientTest {
         }
         assertEquals(listOf(ChatEvent.Error("queue_full")), collect(url))
     }
+
+    @Test
+    fun `연결은 받았지만 응답을 시작하지 않으면 LlmUnreachable`() {
+        val url = startServer { releaseStalledHandler.await(10, TimeUnit.SECONDS) }   // 헤더를 보내지 않는다
+        val client = LlmChatStreamClient(ObjectMapper(), url, Duration.ofSeconds(5),
+            headerTimeout = Duration.ofMillis(300))
+        assertThrows(LlmUnreachable::class.java) {
+            client.stream("req-1", listOf(mapOf("role" to "user", "content" to "hi"))) {}
+        }
+    }
+
+    @Test
+    fun `연결 직후 끊기면 LlmUnreachable`() {
+        ServerSocket(0).use { listener ->
+            val closer = Thread { runCatching { listener.accept().close() } }.apply { isDaemon = true; start() }
+            assertThrows(LlmUnreachable::class.java) { collect("http://127.0.0.1:${listener.localPort}") }
+            closer.join(1_000)
+        }
+    }
+
+    @Test
+    fun `호출부가 읽는 스레드를 깨우면 기다리지 않고 끝난다 - 떠난 브라우저의 슬롯 반납 경로`() {
+        val url = startServer { exchange ->
+            exchange.sendResponseHeaders(200, 0)
+            exchange.responseBody.write("""{"type":"start"}""".toByteArray() + '\n'.code.toByte())
+            exchange.responseBody.flush()
+            releaseStalledHandler.await(10, TimeUnit.SECONDS)
+        }
+        val received = mutableListOf<ChatEvent>()
+        val reader = Thread {
+            LlmChatStreamClient(ObjectMapper(), url, Duration.ofSeconds(30))
+                .stream("req-1", listOf(mapOf("role" to "user", "content" to "hi"))) { received += it }
+        }
+        reader.start()
+        val deadline = System.currentTimeMillis() + 3_000
+        while (received.isEmpty() && System.currentTimeMillis() < deadline) Thread.sleep(10)
+        reader.interrupt()
+        reader.join(3_000)
+        assertFalse(reader.isAlive, "중단 신호 후에도 llm 스트림을 붙잡고 있다")
+        assertEquals(listOf(ChatEvent.Start, ChatEvent.Error("upstream")), received)
+    }
 }
