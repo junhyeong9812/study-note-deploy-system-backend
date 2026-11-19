@@ -7,6 +7,10 @@ RUN ./gradlew --no-daemon dependencies > /dev/null 2>&1 || true   # 의존성 �
 COPY src ./src
 RUN ./gradlew --no-daemon bootJar
 
+# 테스트 — 배포 전에 ci-cd agent 가 `docker build --target test` 로 실행한다 (실패하면 배포 안 함)
+FROM build AS test
+RUN ./gradlew --no-daemon test
+
 # 실행
 FROM eclipse-temurin:21-jre
 WORKDIR /app

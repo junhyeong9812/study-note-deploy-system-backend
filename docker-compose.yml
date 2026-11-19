@@ -1,6 +1,7 @@
 services:
   app:
     build: .
+    image: backend-app:${IMAGE_TAG:-current}   # ci-cd: CI 가 커밋 태그로 빌드, CD 가 그 태그로 교체
     container_name: backend-app
     ports:
       # 전제: 호스트는 사설 LAN 단일 인터페이스(공유기 뒤). 공인 인터페이스가 생기면 BIND_ADDR로 제한 (리뷰 B14)
