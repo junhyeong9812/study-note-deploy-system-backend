@@ -139,10 +139,14 @@ class LlmChatStreamClientTest {
                     firstEventArrived.countDown()
                 }
         }
+        reader.isDaemon = true                 // 단언이 먼저 실패해도 스레드가 테스트 JVM을 붙잡지 않게
         reader.start()
-        assertTrue(firstEventArrived.await(3, TimeUnit.SECONDS), "start 이벤트가 오지 않았다")
-        reader.interrupt()
-        reader.join(3_000)
+        try {
+            assertTrue(firstEventArrived.await(3, TimeUnit.SECONDS), "start 이벤트가 오지 않았다")
+        } finally {
+            reader.interrupt()
+            reader.join(3_000)
+        }
         assertFalse(reader.isAlive, "중단 신호 후에도 llm 스트림을 붙잡고 있다")
         assertEquals(listOf(ChatEvent.Start, ChatEvent.Error("upstream")), received)
     }
