@@ -130,14 +130,17 @@ class LlmChatStreamClientTest {
             exchange.responseBody.flush()
             releaseStalledHandler.await(10, TimeUnit.SECONDS)
         }
-        val received = mutableListOf<ChatEvent>()
+        val received = java.util.concurrent.CopyOnWriteArrayList<ChatEvent>()
+        val firstEventArrived = CountDownLatch(1)
         val reader = Thread {
             LlmChatStreamClient(ObjectMapper(), url, Duration.ofSeconds(30))
-                .stream("req-1", listOf(mapOf("role" to "user", "content" to "hi"))) { received += it }
+                .stream("req-1", listOf(mapOf("role" to "user", "content" to "hi"))) {
+                    received += it
+                    firstEventArrived.countDown()
+                }
         }
         reader.start()
-        val deadline = System.currentTimeMillis() + 3_000
-        while (received.isEmpty() && System.currentTimeMillis() < deadline) Thread.sleep(10)
+        assertTrue(firstEventArrived.await(3, TimeUnit.SECONDS), "start 이벤트가 오지 않았다")
         reader.interrupt()
         reader.join(3_000)
         assertFalse(reader.isAlive, "중단 신호 후에도 llm 스트림을 붙잡고 있다")
