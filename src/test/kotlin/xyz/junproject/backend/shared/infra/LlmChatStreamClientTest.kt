@@ -150,4 +150,109 @@ class LlmChatStreamClientTest {
         assertFalse(reader.isAlive, "중단 신호 후에도 llm 스트림을 붙잡고 있다")
         assertEquals(listOf(ChatEvent.Start, ChatEvent.Error("upstream")), received)
     }
+
+    // ---- llm 교체 중 대기열 인계: retry 를 받으면 같은 질문을 다시 보낸다 ----
+
+    private fun startSequenceServer(vararg responses: Array<String>): Pair<String, java.util.concurrent.atomic.AtomicInteger> {
+        val calls = java.util.concurrent.atomic.AtomicInteger(0)
+        val url = startServer { exchange ->
+            exchange.requestBody.readAllBytes()
+            val index = calls.getAndIncrement().coerceAtMost(responses.size - 1)
+            exchange.sendLines(200, *responses[index])
+        }
+        return url to calls
+    }
+
+    @Test
+    fun `시작 전 retry 를 받으면 다시 보내고 화면에는 retry 를 내보내지 않는다`() {
+        val (url, calls) = startSequenceServer(
+            arrayOf("""{"type":"queued","position":1}""", """{"type":"retry"}"""),
+            arrayOf("""{"type":"queued","position":2}""", """{"type":"start"}""",
+                """{"type":"token","text":"가"}""", """{"type":"done"}"""))
+        assertEquals(
+            listOf(ChatEvent.Queued(1), ChatEvent.Queued(2), ChatEvent.Start, ChatEvent.Token("가"), ChatEvent.Done),
+            collect(url))
+        assertEquals(2, calls.get())
+    }
+
+    @Test
+    fun `다시 보내기는 두 번까지 - 세 번째 retry 는 upstream 오류로 끝난다`() {
+        val (url, calls) = startSequenceServer(arrayOf("""{"type":"retry"}"""))
+        assertEquals(listOf(ChatEvent.Error("upstream")), collect(url))
+        assertEquals(3, calls.get())       // 처음 1회 + 다시 보내기 2회
+    }
+
+    @Test
+    fun `생성이 시작된 뒤의 retry 는 다시 보내지 않고 오류로 끝낸다`() {
+        val (url, calls) = startSequenceServer(
+            arrayOf("""{"type":"start"}""", """{"type":"token","text":"반쯤"}""", """{"type":"retry"}"""))
+        assertEquals(listOf(ChatEvent.Start, ChatEvent.Token("반쯤"), ChatEvent.Error("upstream")), collect(url))
+        assertEquals(1, calls.get())
+    }
+
+    @Test
+    fun `다시 보낸 요청에서 오류가 나면 그 오류로 끝난다`() {
+        val (url, calls) = startSequenceServer(
+            arrayOf("""{"type":"retry"}"""),
+            arrayOf("""{"type":"error","code":"queue_full"}"""))
+        assertEquals(listOf(ChatEvent.Error("queue_full")), collect(url))
+        assertEquals(2, calls.get())
+    }
+
+    @Test
+    fun `다시 보낸 요청이 연결 단계에서 끊기면 한 번 더 보낸다 - 교체 중인 쪽이 연결을 닫는 경우`() {
+        // 가짜 llm: 첫 연결은 retry 를 주고 닫는다. 두 번째 연결은 요청을 받자마자 응답 없이 끊는다(닫히는 연결을 재사용한 상황).
+        // 세 번째 연결에서 정상 응답한다.
+        val listener = ServerSocket(0, 50, java.net.InetAddress.getByName("127.0.0.1"))
+        val connections = java.util.concurrent.atomic.AtomicInteger(0)
+        val serverThread = Thread {
+            try {
+                while (true) {
+                    val socket = listener.accept()
+                    val number = connections.incrementAndGet()
+                    socket.use { accepted ->
+                        val reader = accepted.getInputStream().bufferedReader()
+                        var contentLength = 0
+                        while (true) {
+                            val header = reader.readLine() ?: break
+                            if (header.isEmpty()) break
+                            if (header.lowercase().startsWith("content-length:")) contentLength = header.substringAfter(":").trim().toInt()
+                        }
+                        repeat(contentLength) { reader.read() }
+                        val output = accepted.getOutputStream()
+                        when (number) {
+                            1 -> output.write(httpResponse("""{"type":"retry"}""" + "\n"))
+                            2 -> accepted.setSoLinger(true, 0)          // 응답 없이 리셋
+                            else -> output.write(httpResponse("""{"type":"start"}""" + "\n" + """{"type":"done"}""" + "\n"))
+                        }
+                        output.flush()
+                    }
+                }
+            } catch (_: java.io.IOException) { /* 테스트 종료 */ }
+        }.apply { isDaemon = true; start() }
+        try {
+            val received = mutableListOf<ChatEvent>()
+            LlmChatStreamClient(ObjectMapper(), "http://127.0.0.1:${listener.localPort}", Duration.ofSeconds(5),
+                resendPause = Duration.ofMillis(10))
+                .stream("req-1", listOf(mapOf("role" to "user", "content" to "hi"))) { received += it }
+            assertEquals(listOf(ChatEvent.Start, ChatEvent.Done), received)
+            assertEquals(3, connections.get())
+        } finally {
+            listener.close()
+            serverThread.join(1000)
+        }
+    }
+
+    private fun httpResponse(body: String): ByteArray {
+        val bytes = body.toByteArray()
+        return ("HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n").toByteArray() + bytes
+    }
+
+    @Test
+    fun `처음 보내는 요청의 연결 실패는 한 번 더 보내지 않고 서버 꺼짐으로 본다`() {
+        val closedPort = ServerSocket(0).use { it.localPort }
+        val started = System.nanoTime()
+        assertThrows(LlmUnreachable::class.java) { collect("http://127.0.0.1:$closedPort") }
+        assertTrue(Duration.ofNanos(System.nanoTime() - started) < Duration.ofSeconds(2))
+    }
 }

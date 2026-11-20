@@ -24,7 +24,10 @@ class LlmChatStreamClient(
     private val llmUrl: String,
     private val idleLimit: Duration,      // 본문에서 이 시간 동안 한 줄도 안 오면 llm이 멈춘 것으로 본다
     private val headerTimeout: Duration = Duration.ofSeconds(30),   // 응답 헤더까지 — 대기열도 헤더는 즉시 보낸다
+    private val maxHandoffs: Int = 2,     // llm 교체 중 "다시 보내라"를 따르는 횟수 상한(한 질문당)
+    private val resendPause: Duration = Duration.ofMillis(200),   // 다시 보낸 요청이 연결 단계에서 끊겼을 때 한 번 더 보내기 전 쉼
 ) : ChatStreamPort {
+    private val log = org.slf4j.LoggerFactory.getLogger(LlmChatStreamClient::class.java)
 
     // 유휴 상한 150s — llm이 Ollama를 기다리는 한도(read 120s)보다 길게: llm이 스스로 오류를 낼 시간을 준다
     @Autowired
@@ -49,7 +52,30 @@ class LlmChatStreamClient(
         }
     }
 
+    /** llm 이 교체 중이라 "다시 보내라"(retry)고 한 줄인가 — 화면에는 내보내지 않는 내부 신호 */
+    private fun isRetryLine(line: String): Boolean =
+        try { objectMapper.readTree(line).path("type").asString("") == "retry" } catch (_: Exception) { false }
+
+    /**
+     * llm 은 무중단 배포로 교체될 때 아직 시작하지 않은 대기자에게 retry 를 보내고 연결을 닫는다.
+     * 그때는 같은 질문을 다시 보낸다 — 새 버전이 받아 줄을 다시 세우고, 화면은 "대기 중"이 이어진다.
+     * 한 질문당 다시 보내기는 [maxHandoffs]번까지. 넘으면 upstream 오류로 끝낸다(무한 반복 금지).
+     */
     override fun stream(requestId: String, messages: List<Map<String, String>>, onEvent: (ChatEvent) -> Unit) {
+        repeat(maxHandoffs + 1) { attempt ->
+            if (!streamOnce(requestId, messages, onEvent, resend = attempt > 0)) return
+            if (attempt == maxHandoffs) {
+                log.warn("{}:backend:chat handoff limit reached ({} resends)", requestId, maxHandoffs)
+                onEvent(ChatEvent.Error("upstream"))
+            } else {
+                log.info("{}:backend:chat handed off by llm — resending ({}/{})", requestId, attempt + 1, maxHandoffs)
+            }
+        }
+    }
+
+    /** 한 번의 요청. llm 이 retry 로 넘겼으면 true(다시 보내야 함), 그 밖에는 false(끝났거나 오류 이벤트를 냈음). */
+    private fun streamOnce(requestId: String, messages: List<Map<String, String>>,
+                           onEvent: (ChatEvent) -> Unit, resend: Boolean): Boolean {
         val body = objectMapper.writeValueAsString(
             mapOf("request_id" to requestId, "messages" to messages))
         val request = HttpRequest.newBuilder(URI.create("$llmUrl/chat"))
@@ -59,7 +85,15 @@ class LlmChatStreamClient(
             .POST(HttpRequest.BodyPublishers.ofString(body))
             .build()
         val response = try {
-            client.send(request, HttpResponse.BodyHandlers.ofInputStream())
+            try {
+                client.send(request, HttpResponse.BodyHandlers.ofInputStream())
+            } catch (error: IOException) {
+                // 다시 보내는 요청은 방금 응답을 마친 연결을 재사용하다가 끊길 수 있다 — 교체 중인 쪽이
+                // 응답 직후 연결을 닫기 때문이다. POST 는 자동 재전송되지 않으므로 여기서 한 번 더 보낸다.
+                if (!resend) throw error
+                Thread.sleep(resendPause.toMillis())
+                client.send(request, HttpResponse.BodyHandlers.ofInputStream())
+            }
         } catch (error: IOException) {
             // 연결 거부·연결/헤더 타임아웃·연결 직후 끊김 — 응답을 시작도 못 했으면 서버가 꺼진 것으로 본다
             throw LlmUnreachable(error)
@@ -69,9 +103,11 @@ class LlmChatStreamClient(
         response.body().use { input ->
             if (response.statusCode() != 200) {
                 onEvent(ChatEvent.Error("upstream"))
-                return
+                return false
             }
             var finished = false
+            var started = false
+            var handedOff = false
             var pendingIdleClose: ScheduledFuture<*>? = null
             fun restartIdleTimer() {
                 pendingIdleClose?.cancel(false)
@@ -83,7 +119,14 @@ class LlmChatStreamClient(
                 input.bufferedReader(Charsets.UTF_8).forEachLine { line ->
                     restartIdleTimer()
                     if (finished || line.isBlank()) return@forEachLine
+                    if (isRetryLine(line)) {
+                        // 생성이 시작된 뒤의 retry 는 계약 밖이다 — 답이 중간에 끊긴 것으로 처리(다시 보내면 답이 두 번 나간다)
+                        if (started) onEvent(ChatEvent.Error("upstream")) else handedOff = true
+                        finished = true
+                        return@forEachLine
+                    }
                     val event = parseEventLine(line) ?: return@forEachLine
+                    if (event is ChatEvent.Start) started = true
                     onEvent(event)
                     if (event is ChatEvent.Done || event is ChatEvent.Error) finished = true
                 }
@@ -93,6 +136,7 @@ class LlmChatStreamClient(
                 pendingIdleClose?.cancel(false)
             }
             if (!finished) onEvent(ChatEvent.Error("upstream"))   // 끝 표시 없이 끊김 = 조용한 절단 금지
+            return handedOff
         }
     }
 }
