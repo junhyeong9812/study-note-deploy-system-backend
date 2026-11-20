@@ -8,7 +8,7 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 50   # 접수 대기 최대 20분 + 조회 최대 25분 + 여유
     env:
       SERVICE: backend
       DEPLOY_URL: https://www.junproject.xyz/api/deploy

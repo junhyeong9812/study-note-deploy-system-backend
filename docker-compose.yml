@@ -54,9 +54,10 @@ services:
       # 전제: 호스트는 사설 LAN 단일 인터페이스(공유기 뒤). 공인 인터페이스가 생기면 BIND_ADDR로 제한 (리뷰 B14)
       - "${BIND_ADDR:?set-in-env}:8090:8090"   # fail-closed — 배포 .env가 LAN 주소 지정 (감사 반영)
     volumes:
-      # 파일 하나가 아니라 디렉토리째 붙인다 — git 이 파일을 새로 만들어도(배포 때 reset) nginx 가 새 내용을 본다
-      - ./deploy/nginx:/etc/nginx:ro
-      - ./deploy/active:/etc/nginx-active:ro       # upstream.conf — 지금 활성 자리(서버에만 있고 git 에 없다)
+      # nginx 는 git 밖의 활성 디렉토리만 읽는다(서버에만 있다): nginx.conf(본 설정 사본) + upstream.conf(활성 자리).
+      # ci-cd agent 가 전환할 때 deploy/nginx/ 의 원본을 여기로 복사하고, 전환에 실패하면 이전 내용으로 되돌린다.
+      # git 작업 트리를 직접 읽게 하면 배포 중 소스 갱신만으로 운영 설정이 바뀐다.
+      - ./deploy/active:/etc/nginx:ro
     restart: unless-stopped
 
   elasticsearch:
