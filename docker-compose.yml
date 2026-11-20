@@ -36,11 +36,13 @@ x-app: &app
 services:
   app-blue:
     <<: *app
+    profiles: ["blue"]           # 이름을 지정해야만 뜬다 — `docker compose up -d` 가 두 자리를 한꺼번에 띄우지 않게
     container_name: backend-app-blue
     ports:
       - "127.0.0.1:18090:8090"     # agent 의 자리별 헬스 확인용 — 외부에는 nginx 만 열린다
   app-green:
     <<: *app
+    profiles: ["green"]
     container_name: backend-app-green
     ports:
       - "127.0.0.1:18091:8090"
@@ -52,8 +54,9 @@ services:
       # 전제: 호스트는 사설 LAN 단일 인터페이스(공유기 뒤). 공인 인터페이스가 생기면 BIND_ADDR로 제한 (리뷰 B14)
       - "${BIND_ADDR:?set-in-env}:8090:8090"   # fail-closed — 배포 .env가 LAN 주소 지정 (감사 반영)
     volumes:
-      - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./deploy/active:/etc/nginx/active:ro       # upstream.conf — 지금 활성 자리(서버에만 있고 git 에 없다)
+      # 파일 하나가 아니라 디렉토리째 붙인다 — git 이 파일을 새로 만들어도(배포 때 reset) nginx 가 새 내용을 본다
+      - ./deploy/nginx:/etc/nginx:ro
+      - ./deploy/active:/etc/nginx-active:ro       # upstream.conf — 지금 활성 자리(서버에만 있고 git 에 없다)
     restart: unless-stopped
 
   elasticsearch:
