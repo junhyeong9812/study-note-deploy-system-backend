@@ -41,3 +41,6 @@ out/
 .env
 build/
 .gradle/
+
+# 활성 자리 파일 — 서버마다 다르고 ci-cd agent 가 바꾼다
+deploy/active/

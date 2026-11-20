@@ -1,38 +1,59 @@
+# 무중단 배포: 앱은 두 자리(blue·green)로 뜨고 nginx 가 그중 하나로 보낸다. 평소에는 한 자리만 떠 있다.
+# 전환은 ci-cd agent 가 한다(deploy/active/upstream.conf 교체 → nginx reload). 수동 조작은 ci-cd README 참고.
+x-app: &app
+  build: .
+  image: backend-app:${IMAGE_TAG:-local}   # ci-cd: CI 가 커밋 태그로 빌드, CD 가 그 태그로 교체
+  environment:
+    ES_URL: http://elasticsearch:9200
+    EMBEDDING_URL: http://embedding:8080
+    LLM_URL: ${LLM_URL:?set-in-env}          # .164 wrapper (배포 .env — repo에 IP 금지)
+    CLAUDE_BRIDGE_URL: ${CLAUDE_BRIDGE_URL:-} # 에스컬레이션 브리지 — 비우면 escalate_unavailable
+    BRIDGE_SECRET: ${BRIDGE_SECRET:-}          # 브리지 인증
+    LOG_REDIS_URL: redis://redis:6379
+    SERVER_NAME: backend
+    SYNC_SECRET: ${SYNC_SECRET:?set-in-env}
+    STUDY_NOTE_REMOTE: https://github.com/junhyeong9812/study-note.git
+    REPO_DIR: /data/study-note/repo
+    STATE_FILE: /data/study-note/last_sha
+  volumes:
+    - study-note-repo:/data/study-note       # clone 볼륨 (sync가 pull)
+  depends_on:
+    elasticsearch:
+      condition: service_healthy
+    redis:
+      condition: service_started
+    embedding:
+      condition: service_healthy   # BGE-M3 모델 로딩(1~2분) 전에 /embed를 치면 연결 거부 (실측)
+  healthcheck:
+    # localhost 금지 — 컨테이너 안에서 ::1로 풀려 IPv4 바인딩 서버가 unhealthy로 찍힘
+    test: ["CMD-SHELL", "curl -fsS -m 5 http://127.0.0.1:8090/actuator/health || exit 1"]
+    interval: 30s
+    timeout: 10s
+    retries: 3
+  restart: unless-stopped
+  stop_grace_period: 30s
+
 services:
-  app:
-    build: .
-    image: backend-app:${IMAGE_TAG:-local}   # ci-cd: CI 가 커밋 태그로 빌드, CD 가 그 태그로 교체
-    container_name: backend-app
+  app-blue:
+    <<: *app
+    container_name: backend-app-blue
+    ports:
+      - "127.0.0.1:18090:8090"     # agent 의 자리별 헬스 확인용 — 외부에는 nginx 만 열린다
+  app-green:
+    <<: *app
+    container_name: backend-app-green
+    ports:
+      - "127.0.0.1:18091:8090"
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: backend-nginx
     ports:
       # 전제: 호스트는 사설 LAN 단일 인터페이스(공유기 뒤). 공인 인터페이스가 생기면 BIND_ADDR로 제한 (리뷰 B14)
       - "${BIND_ADDR:?set-in-env}:8090:8090"   # fail-closed — 배포 .env가 LAN 주소 지정 (감사 반영)
-    environment:
-      ES_URL: http://elasticsearch:9200
-      EMBEDDING_URL: http://embedding:8080
-      LLM_URL: ${LLM_URL:?set-in-env}          # .164 wrapper (배포 .env — repo에 IP 금지)
-      CLAUDE_BRIDGE_URL: ${CLAUDE_BRIDGE_URL:-} # 에스컬레이션 브리지 — 비우면 escalate_unavailable
-      BRIDGE_SECRET: ${BRIDGE_SECRET:-}          # 브리지 인증
-      LOG_REDIS_URL: redis://redis:6379
-      SERVER_NAME: backend
-      SYNC_SECRET: ${SYNC_SECRET:?set-in-env}
-      STUDY_NOTE_REMOTE: https://github.com/junhyeong9812/study-note.git
-      REPO_DIR: /data/study-note/repo
-      STATE_FILE: /data/study-note/last_sha
     volumes:
-      - study-note-repo:/data/study-note       # clone 볼륨 (sync가 pull)
-    depends_on:
-      elasticsearch:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      embedding:
-        condition: service_healthy   # BGE-M3 모델 로딩(1~2분) 전에 /embed를 치면 연결 거부 (실측)
-    healthcheck:
-      # localhost 금지 — 컨테이너 안에서 ::1로 풀려 IPv4 바인딩 서버가 unhealthy로 찍힘
-      test: ["CMD-SHELL", "curl -fsS -m 5 http://127.0.0.1:8090/actuator/health || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/active:/etc/nginx/active:ro       # upstream.conf — 지금 활성 자리(서버에만 있고 git 에 없다)
     restart: unless-stopped
 
   elasticsearch:
