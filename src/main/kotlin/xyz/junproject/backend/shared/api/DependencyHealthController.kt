@@ -49,15 +49,23 @@ class DependencyHealthController(
     companion object {
         private val client: HttpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build()
 
-        private fun expectOk(url: String) {
+        private fun expectOk(url: String): String {
             val request = HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(2)).GET().build()
-            val status = client.send(request, HttpResponse.BodyHandlers.discarding()).statusCode()
-            check(status == 200) { "status $status" }
+            val response = client.send(request, HttpResponse.BodyHandlers.ofString())
+            check(response.statusCode() == 200) { "status ${response.statusCode()}" }
+            return response.body()
+        }
+
+        /** ES 는 클러스터가 red(검색 불가)여도 200 을 준다 — 본문의 status 까지 본다. */
+        internal fun requireUsableCluster(clusterHealthBody: String) {
+            check(!Regex(""""status"\s*:\s*"red"""").containsMatchIn(clusterHealthBody)) { "cluster status red" }
         }
 
         fun defaultChecks(redis: StringRedisTemplate): Map<String, () -> Unit> = linkedMapOf(
-            "elasticsearch" to { expectOk((System.getenv("ES_URL") ?: "http://elasticsearch:9200") + "/_cluster/health") },
-            "embedding" to { expectOk((System.getenv("EMBEDDING_URL") ?: "http://embedding:8080") + "/health") },
+            "elasticsearch" to {
+                requireUsableCluster(expectOk((System.getenv("ES_URL") ?: "http://elasticsearch:9200") + "/_cluster/health"))
+            },
+            "embedding" to { expectOk((System.getenv("EMBEDDING_URL") ?: "http://embedding:8080") + "/health"); Unit },
             "redis" to {
                 val reply = redis.execute { connection -> connection.ping() }
                 check(reply == "PONG") { "ping 응답이 다름: $reply" }

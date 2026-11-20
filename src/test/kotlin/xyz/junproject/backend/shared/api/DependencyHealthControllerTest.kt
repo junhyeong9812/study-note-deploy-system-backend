@@ -33,4 +33,14 @@ class DependencyHealthControllerTest {
         assertEquals("DOWN", components(body)["embedding"]?.get("status"))
         assertEquals("UP", components(body)["redis"]?.get("status"))
     }
+
+    @Test
+    fun `ES 클러스터가 red 면 200 이어도 안 되는 것으로 본다`() {
+        DependencyHealthController.requireUsableCluster("""{"cluster_name":"docker-cluster","status":"yellow","number_of_nodes":1}""")
+        DependencyHealthController.requireUsableCluster("""{"status" : "green"}""")
+        val failure = assertThrows(IllegalStateException::class.java) {
+            DependencyHealthController.requireUsableCluster("""{"cluster_name":"docker-cluster","status":"red","timed_out":false}""")
+        }
+        assertEquals("cluster status red", failure.message)
+    }
 }
