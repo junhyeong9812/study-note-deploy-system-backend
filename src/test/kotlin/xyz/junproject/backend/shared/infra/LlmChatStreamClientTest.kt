@@ -150,4 +150,52 @@ class LlmChatStreamClientTest {
         assertFalse(reader.isAlive, "중단 신호 후에도 llm 스트림을 붙잡고 있다")
         assertEquals(listOf(ChatEvent.Start, ChatEvent.Error("upstream")), received)
     }
+
+    // ---- llm 교체 중 대기열 인계: retry 를 받으면 같은 질문을 다시 보낸다 ----
+
+    private fun startSequenceServer(vararg responses: Array<String>): Pair<String, java.util.concurrent.atomic.AtomicInteger> {
+        val calls = java.util.concurrent.atomic.AtomicInteger(0)
+        val url = startServer { exchange ->
+            exchange.requestBody.readAllBytes()
+            val index = calls.getAndIncrement().coerceAtMost(responses.size - 1)
+            exchange.sendLines(200, *responses[index])
+        }
+        return url to calls
+    }
+
+    @Test
+    fun `시작 전 retry 를 받으면 다시 보내고 화면에는 retry 를 내보내지 않는다`() {
+        val (url, calls) = startSequenceServer(
+            arrayOf("""{"type":"queued","position":1}""", """{"type":"retry"}"""),
+            arrayOf("""{"type":"queued","position":2}""", """{"type":"start"}""",
+                """{"type":"token","text":"가"}""", """{"type":"done"}"""))
+        assertEquals(
+            listOf(ChatEvent.Queued(1), ChatEvent.Queued(2), ChatEvent.Start, ChatEvent.Token("가"), ChatEvent.Done),
+            collect(url))
+        assertEquals(2, calls.get())
+    }
+
+    @Test
+    fun `다시 보내기는 두 번까지 - 세 번째 retry 는 upstream 오류로 끝난다`() {
+        val (url, calls) = startSequenceServer(arrayOf("""{"type":"retry"}"""))
+        assertEquals(listOf(ChatEvent.Error("upstream")), collect(url))
+        assertEquals(3, calls.get())       // 처음 1회 + 다시 보내기 2회
+    }
+
+    @Test
+    fun `생성이 시작된 뒤의 retry 는 다시 보내지 않고 오류로 끝낸다`() {
+        val (url, calls) = startSequenceServer(
+            arrayOf("""{"type":"start"}""", """{"type":"token","text":"반쯤"}""", """{"type":"retry"}"""))
+        assertEquals(listOf(ChatEvent.Start, ChatEvent.Token("반쯤"), ChatEvent.Error("upstream")), collect(url))
+        assertEquals(1, calls.get())
+    }
+
+    @Test
+    fun `다시 보낸 요청에서 오류가 나면 그 오류로 끝난다`() {
+        val (url, calls) = startSequenceServer(
+            arrayOf("""{"type":"retry"}"""),
+            arrayOf("""{"type":"error","code":"queue_full"}"""))
+        assertEquals(listOf(ChatEvent.Error("queue_full")), collect(url))
+        assertEquals(2, calls.get())
+    }
 }
