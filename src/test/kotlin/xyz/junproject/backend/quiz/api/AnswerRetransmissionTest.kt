@@ -25,9 +25,8 @@ class AnswerRetransmissionTest {
 
     /** 내용이 바뀐다 — 새 판으로 옮기고 질문 2 의 글이 달라진다. 처음 판(HEAD)은 더는 읽을 수 없다(얕은 사본) */
     private fun contentChangesAndOldShaIsGone(questions: String = QuizContent.OLD_PROCESS_QUESTIONS, answers: String = QuizContent.OLD_PROCESS_ANSWERS) {
-        bed.notes.head = QuizContent.NEW_SHA
-        bed.notes.current["$TOPIC/1-question.md"] = questions
-        bed.notes.current["$TOPIC/3-answer.md"] = answers
+        bed.notes.commit(QuizContent.NEW_SHA, mapOf("$TOPIC/1-question.md" to questions, "$TOPIC/3-answer.md" to answers))
+        bed.notes.forget(QuizContent.HEAD)
     }
 
     private val body = { bed.answerBody(number = 2, answer = "처음 쓴 답", attemptId = attemptId.toString()) }
@@ -215,8 +214,7 @@ class AnswerRetransmissionTest {
         assertEquals(attemptOf(first), attemptOf(whenUnsplittable))
         assertNull(bed.data(whenUnsplittable)["correct_answer"], whenUnsplittable.contentAsString)
 
-        bed.notes.current.remove("$TOPIC/1-question.md")
-        bed.notes.current.remove("$TOPIC/3-answer.md")
+        bed.notes.commit(QuizContent.NEWER_SHA, mapOf("$TOPIC/1-question.md" to null, "$TOPIC/2-summary.md" to null, "$TOPIC/3-answer.md" to null))
         val whenGone = bed.submit(body(), bed.visitorCookie(token))
         assertEquals(200, whenGone.status, whenGone.contentAsString)
         assertEquals(attemptOf(first), attemptOf(whenGone))
@@ -225,29 +223,22 @@ class AnswerRetransmissionTest {
         assertEquals(1, bed.fake.attempts.size)
     }
 
-    // ── 지금 판으로 읽을 때의 틈(명세 21) ─────────────────────────────
+    // ── 동기화의 틈 — 퀴즈 경로는 내용을 늘 판으로 읽는다(명세 22) ─────────────
 
-    /** 판마다의 내용 — 저장된 content_sha 의 판에서 질문 · 정답을 다시 꺼내 응답 · 기록과 견준다 */
-    private val versions = mutableMapOf<String, Pair<String, String>>()
-
+    /** 판마다의 글 — 저장된 content_sha 의 판에서 질문 · 정답을 다시 꺼내 응답 · 기록과 견준다 */
     private fun splitAt(sha: String): QuizSplitResult.Split {
-        val (questions, answers) = versions.getValue(sha)
-        return QuizSplitter.split(questions, answers) as QuizSplitResult.Split
+        val files = bed.notes.filesAt(sha)
+        return QuizSplitter.split(files.getValue("$TOPIC/1-question.md"), files.getValue("$TOPIC/3-answer.md")) as QuizSplitResult.Split
     }
 
     /**
-     * 끼어들기: 서비스가 지금 판의 SHA(HEAD)를 읽은 뒤 · 작업 트리를 읽기 직전에 동기화가 새 판(NEW_SHA)으로 옮긴다.
-     * 처음 판(HEAD)은 git 에서 계속 읽을 수 있다(동기화는 커밋을 지우지 않는다).
+     * 실제 틈: 내용 동기화가 작업 트리의 파일은 새 판(NEW_SHA)으로 이미 바꿨는데 지금 판의 표시는 아직 HEAD 다
+     * (`git reset --hard` 는 파일을 먼저 바꾸고 표시를 나중에 옮긴다 — 그 사이에는 currentHead() 를 몇 번 읽어도 HEAD).
      */
-    private fun syncInterleavesWith(newQuestions: String, newAnswers: String) {
-        versions[QuizContent.HEAD] = QuizContent.PROCESS_QUESTIONS to QuizContent.PROCESS_ANSWERS
-        versions[QuizContent.NEW_SHA] = newQuestions to newAnswers
-        keepOldShaReadable()
-        bed.notes.syncBeforeNextRead = {
-            bed.notes.head = QuizContent.NEW_SHA
-            bed.notes.current["$TOPIC/1-question.md"] = newQuestions
-            bed.notes.current["$TOPIC/3-answer.md"] = newAnswers
-        }
+    private fun workingTreeAheadOfHead(newQuestions: String, newAnswers: String) {
+        bed.notes.commit(QuizContent.NEW_SHA, mapOf("$TOPIC/1-question.md" to newQuestions, "$TOPIC/3-answer.md" to newAnswers), moveHead = false)
+        assertEquals(QuizContent.HEAD, bed.notes.currentHead())
+        assertEquals(newQuestions, bed.notes.current["$TOPIC/1-question.md"])
     }
 
     /** 저장된 시도의 판 · 해시 · 응답의 정답이 서로 맞는다 */
@@ -262,26 +253,45 @@ class AnswerRetransmissionTest {
     }
 
     @Test
-    fun `동기화가 끼어들어 정답 파일만 바뀌어도 저장된 판과 응답의 정답이 서로 맞고 재전송도 같은 정답을 준다`() {
+    fun `작업 트리가 지금 판보다 앞서 있어도 질문 목록은 지금 판의 SHA 와 그 판의 글 해시를 낸다`() {
+        workingTreeAheadOfHead(QuizContent.OLD_PROCESS_QUESTIONS, QuizContent.OLD_PROCESS_ANSWERS)
+
+        val response = bed.questions(TOPIC)
+
+        assertEquals(200, response.status, response.contentAsString)
+        val data = bed.data(response)
+        assertEquals(QuizContent.HEAD, data["content_sha"])
+        @Suppress("UNCHECKED_CAST")
+        val questions = data["questions"] as List<Map<String, Any?>>
+        val expected = splitAt(QuizContent.HEAD).questions
+        assertEquals(expected.map { it.text }, questions.map { it["text"] })
+        assertEquals(expected.map { it.hash }, questions.map { it["hash"] })
+        assertFalse(response.contentAsString.contains("(옛 판)"), "작업 트리(새 판)의 글이 섞였다")
+    }
+
+    @Test
+    fun `작업 트리가 지금 판보다 앞서 있어도 정답 파일만 바뀐 경우 저장된 판과 응답의 정답이 맞고 재전송도 같은 정답을 준다`() {
         val (token, _) = bed.knownVisitor()
-        syncInterleavesWith(QuizContent.PROCESS_QUESTIONS,
+        workingTreeAheadOfHead(QuizContent.PROCESS_QUESTIONS,
             QuizContent.PROCESS_ANSWERS.replace("ANSWER-MARK-2 스레드는 주소 공간을 함께 쓴다.", "ANSWER-MARK-SYNCED-2 동기화된 정답."))
 
-        val first = bed.submit(body(), bed.visitorCookie(token))
+        val first = bed.submit(body(), bed.visitorCookie(token))   // 받은 SHA = HEAD, 해시 = HEAD 판의 질문 2
 
         assertEquals(200, first.status, first.contentAsString)
         assertEquals(true, bed.data(first)["saved"])
+        assertEquals(QuizContent.HEAD, bed.fake.attempts.values.single().contentSha)
         assertConsistentWithStoredVersion(first)
+        assertFalse(first.contentAsString.contains("ANSWER-MARK-SYNCED-2"), "작업 트리(새 판)의 정답이 실렸다")
         val again = bed.submit(body(), bed.visitorCookie(token))
         assertEquals(correctAnswerOf(first), correctAnswerOf(again))
     }
 
     @Test
-    fun `동기화가 끼어들어 질문 글도 바뀌면 받은 판의 질문과 맞는 답은 그 판으로 저장되고 그 판의 정답이 실린다`() {
+    fun `작업 트리가 지금 판보다 앞서 있어도 받은 판의 질문과 맞는 답은 그 판으로 저장되고 그 판의 정답이 실린다`() {
         val (token, _) = bed.knownVisitor()
-        syncInterleavesWith(QuizContent.OLD_PROCESS_QUESTIONS, QuizContent.OLD_PROCESS_ANSWERS)
+        workingTreeAheadOfHead(QuizContent.OLD_PROCESS_QUESTIONS, QuizContent.OLD_PROCESS_ANSWERS)
 
-        val response = bed.submit(body(), bed.visitorCookie(token))   // 받은 SHA = HEAD, 해시 = HEAD 판의 질문 2
+        val response = bed.submit(body(), bed.visitorCookie(token))
 
         assertEquals(200, response.status, response.contentAsString)
         assertEquals(true, bed.data(response)["saved"])
@@ -291,11 +301,11 @@ class AnswerRetransmissionTest {
     }
 
     @Test
-    fun `동기화가 끼어들어 받은 판에 없는 해시면 question_changed 이고 그 판에 없는 해시가 기록에 남지 않는다`() {
+    fun `작업 트리가 지금 판보다 앞서 있을 때 받은 판에 없는 해시를 붙여 내면 question_changed 이고 저장되지 않는다`() {
         val (token, _) = bed.knownVisitor()
-        syncInterleavesWith(QuizContent.OLD_PROCESS_QUESTIONS, QuizContent.OLD_PROCESS_ANSWERS)
+        workingTreeAheadOfHead(QuizContent.OLD_PROCESS_QUESTIONS, QuizContent.OLD_PROCESS_ANSWERS)
 
-        // 받은 SHA 는 HEAD 인데 해시는 새 판의 질문 2 — HEAD 판의 질문과 맞지 않는다
+        // 받은 SHA 는 HEAD 인데 해시는 작업 트리(새 판)의 질문 2
         val response = bed.submit(body().plus("question_hash" to QuizContent.oldQuestionTwoHash), bed.visitorCookie(token))
 
         assertEquals(409, response.status, response.contentAsString)

@@ -43,9 +43,10 @@ class MutableClock(var instant: Instant) : Clock() {
 }
 
 /**
- * 내용 저장소의 가짜 — 지금 판([current] · [head])과 옛 판([history], (SHA, 경로))을 갖는다.
- * 지금 판의 SHA 로 [readFileAt] 을 불러도 지금 판을 준다. 없는 파일 · 모르는 SHA 는 FileNotFoundException(GitRepository 와 같은 계약).
- * 읽은 것은 [reads](지금 판 경로) · [readsAt](SHA 와 경로)에 남는다.
+ * 내용 저장소의 가짜 — 판별 글([history], (SHA, 경로) — git 이 아는 것)과 작업 트리의 글([current])을 **따로** 갖는다.
+ * 내용 동기화(`git reset --hard`)는 작업 트리를 먼저 바꾸고 지금 판의 표시([head])를 나중에 옮긴다 — [commit] 의 moveHead=false 가 그 사이다.
+ * [readFileAt] 은 판별 글만 본다(작업 트리로 대신 답하지 않는다). 없는 파일 · 모르는 SHA 는 FileNotFoundException(GitRepository 와 같은 계약).
+ * 읽은 것은 [reads](작업 트리) · [readsAt](SHA 와 경로)에 남는다.
  */
 class FakeNoteSource : NoteSourcePort {
     var head: String = QuizContent.HEAD
@@ -56,23 +57,35 @@ class FakeNoteSource : NoteSourcePort {
 
     override fun allMarkdown(): List<String> = current.keys.sorted()
     override fun currentHead(): String = head
-    /**
-     * 다음 작업 트리 읽기 직전에 한 번 돈다 — 내용 동기화가 "지금 판의 SHA 를 읽은 뒤 · 파일을 읽기 전"에 끼어드는 순간을 만든다
-     * (그 안에서 [head] 와 [current] 를 바꾼다). 한 번 돌면 비워진다.
-     */
-    var syncBeforeNextRead: (() -> Unit)? = null
 
     override fun readFile(path: String): String {
-        syncBeforeNextRead?.let { sync -> syncBeforeNextRead = null; sync() }
         reads += path
         return current[path] ?: throw FileNotFoundException(path)
     }
     override fun recentCommits(limit: Int): List<CommitInfo> = emptyList()
     override fun readFileAt(sha: String, path: String): String {
         readsAt += sha to path
-        if (sha == head) return current[path] ?: throw FileNotFoundException("$sha:$path")
         return history[sha to path] ?: throw FileNotFoundException("$sha:$path")
     }
+
+    /** 그 판의 글 전부(경로 → 글) */
+    fun filesAt(sha: String): Map<String, String> = history.filterKeys { it.first == sha }.mapKeys { it.key.second }
+
+    /**
+     * 새 판 [sha] 를 만든다 — 지금 판의 글에 [changes](경로 → 새 글, null 이면 지움)를 얹는다.
+     * [workingTree] 면 작업 트리를 그 판의 글로 바꾸고, [moveHead] 면 지금 판의 표시를 옮긴다.
+     * 동기화의 틈("작업 트리는 새 판인데 지금 판은 아직 앞 판")은 moveHead=false.
+     */
+    fun commit(sha: String, changes: Map<String, String?>, workingTree: Boolean = true, moveHead: Boolean = true) {
+        val files = filesAt(head).toMutableMap()
+        changes.forEach { (path, text) -> if (text == null) files.remove(path) else files[path] = text }
+        files.forEach { (path, text) -> history[sha to path] = text }
+        if (workingTree) { current.clear(); current.putAll(files) }
+        if (moveHead) head = sha
+    }
+
+    /** 그 판을 더는 읽을 수 없게 한다(얕은 사본이 잃음) */
+    fun forget(sha: String) { history.keys.removeIf { it.first == sha } }
 
     /** 아무 판에서든 읽힌 경로 */
     fun everyReadPath(): List<String> = reads + readsAt.map { it.second }
@@ -102,6 +115,8 @@ object QuizContent {
     const val OLD_SHA = "2222222222222222222222222222222222222222"
     /** 내용이 바뀐 뒤의 새 판 */
     const val NEW_SHA = "4444444444444444444444444444444444444444"
+    /** 그다음 판 */
+    const val NEWER_SHA = "5555555555555555555555555555555555555555"
     /** 얕은 사본에 없는(읽을 수 없는) SHA */
     const val UNREADABLE_SHA = "3333333333333333333333333333333333333333"
 
@@ -196,16 +211,22 @@ object QuizContent {
         ANSWER-MARK-BROKEN-1 하나뿐인 정답
     """.trimIndent() + "\n"
 
+    /** 지금 판(HEAD)의 글을 판별 글과 작업 트리에 같이 둔다 — 옛 판(OLD_SHA)은 판별 글에만 */
     fun install(notes: FakeNoteSource) {
-        notes.current["$TOPIC/1-question.md"] = PROCESS_QUESTIONS
-        notes.current["$TOPIC/2-summary.md"] = "# 요약\n"
-        notes.current["$TOPIC/3-answer.md"] = PROCESS_ANSWERS
-        notes.current["$OTHER_TOPIC/1-question.md"] = TCP_QUESTIONS
-        notes.current["$OTHER_TOPIC/3-answer.md"] = TCP_ANSWERS
-        notes.current["$BROKEN_TOPIC/1-question.md"] = BROKEN_QUESTIONS
-        notes.current["$BROKEN_TOPIC/3-answer.md"] = BROKEN_ANSWERS
-        notes.current["$OUTSIDE_TOPIC/1-question.md"] = TCP_QUESTIONS
-        notes.current["$OUTSIDE_TOPIC/3-answer.md"] = TCP_ANSWERS
+        val files = linkedMapOf(
+            "$TOPIC/1-question.md" to PROCESS_QUESTIONS,
+            "$TOPIC/2-summary.md" to "# 요약\n",
+            "$TOPIC/3-answer.md" to PROCESS_ANSWERS,
+            "$OTHER_TOPIC/1-question.md" to TCP_QUESTIONS,
+            "$OTHER_TOPIC/3-answer.md" to TCP_ANSWERS,
+            "$BROKEN_TOPIC/1-question.md" to BROKEN_QUESTIONS,
+            "$BROKEN_TOPIC/3-answer.md" to BROKEN_ANSWERS,
+            "$OUTSIDE_TOPIC/1-question.md" to TCP_QUESTIONS,
+            "$OUTSIDE_TOPIC/3-answer.md" to TCP_ANSWERS,
+        )
+        notes.head = HEAD
+        files.forEach { (path, text) -> notes.history[HEAD to path] = text }
+        notes.current.putAll(files)
         notes.history[OLD_SHA to "$TOPIC/1-question.md"] = OLD_PROCESS_QUESTIONS
         notes.history[OLD_SHA to "$TOPIC/3-answer.md"] = OLD_PROCESS_ANSWERS
     }

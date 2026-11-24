@@ -329,11 +329,12 @@ class QuizAnswerSubmitTest {
     }
 
     @Test
-    fun `받은 SHA 가 지금 판이면 git 을 띄우지 않고 작업 트리에서 읽는다`() {
+    fun `받은 SHA 가 지금 판이어도 작업 트리를 읽지 않고 그 판을 지정해 읽는다`() {
         val response = bed.submit(bed.answerBody(contentSha = QuizContent.HEAD))
         assertEquals(true, bed.data(response)["saved"], response.contentAsString)
-        assertEquals(emptyList<Pair<String, String>>(), bed.notes.readsAt, "지금 판인데 readFileAt(git) 을 불렀다")
-        assertTrue("$TOPIC/1-question.md" in bed.notes.reads, bed.notes.reads.toString())
+        assertEquals(emptyList<String>(), bed.notes.reads, "퀴즈 경로가 작업 트리를 읽었다")
+        assertTrue((QuizContent.HEAD to "$TOPIC/1-question.md") in bed.notes.readsAt, bed.notes.readsAt.toString())
+        assertTrue(bed.notes.readsAt.all { (sha, _) -> sha == QuizContent.HEAD }, bed.notes.readsAt.toString())
     }
 
     @Test
@@ -347,6 +348,8 @@ class QuizAnswerSubmitTest {
         val response = bed.submit(bed.answerBody(contentSha = QuizContent.UNREADABLE_SHA, questionHash = QuizContent.hashOf(TOPIC, 2)))
         assertEquals(true, bed.data(response)["saved"], response.contentAsString)
         assertEquals(QuizContent.HEAD, bed.fake.attempts.values.single().contentSha)
+        assertTrue((QuizContent.HEAD to "$TOPIC/1-question.md") in bed.notes.readsAt, "지금 판의 SHA 로 읽지 않았다: ${bed.notes.readsAt}")
+        assertEquals(emptyList<String>(), bed.notes.reads, "퀴즈 경로가 작업 트리를 읽었다")
     }
 
     @Test
