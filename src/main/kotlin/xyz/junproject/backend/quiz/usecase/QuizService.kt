@@ -183,25 +183,28 @@ class QuizService(
     private fun readOrNull(read: () -> String): String? =
         try { read() } catch (_: FileNotFoundException) { null } catch (_: NoSuchFileException) { null }
 
-    /** 지금 판의 그 주제 — 질문 파일이 없으면 null(없는 주제). 정답 파일이 없으면 정답이 모자란 주제로 쪼개진다 */
-    private fun currentTopic(topic: String): QuizSplitResult? {
-        val questions = readOrNull { notes.readFile(questionFile(topic)) } ?: return null
-        return QuizSplitter.split(questions, readOrNull { notes.readFile(answerFile(topic)) } ?: "")
-    }
+    /** 지금 판의 SHA — 한 요청에서 한 번 읽어 그 값으로 읽는다(두 번 읽으면 SHA 와 글이 갈릴 수 있다) */
+    private fun currentHead(): String = notes.currentHead().trim()
 
-    /** [sha] 판의 그 주제(git) — 그 판을 읽을 수 없으면(얕은 사본 · 없는 SHA · 그때 없던 주제) null. [sha] 는 [COMMIT_SHA] 를 통과한 값 */
+    /**
+     * [sha] 판의 그 주제(git) — 그 판을 읽을 수 없으면(얕은 사본 · 없는 SHA · 그때 없던 주제) null. 정답 파일이 없으면 정답이 모자란 주제로 쪼개진다.
+     * 퀴즈 경로는 내용을 늘 판을 지정해 읽는다 — 작업 트리는 어느 판의 글인지 보장하지 않는다(동기화는 파일을 먼저 바꾸고 지금 판의 표시를
+     * 나중에 옮긴다, 명세 22). [sha] 는 [COMMIT_SHA] 를 통과한 값이거나 지금 판의 SHA
+     */
     private fun topicAt(sha: String, topic: String): QuizSplitResult? {
         val questions = readOrNull { notes.readFileAt(sha, questionFile(topic)) } ?: return null
         return QuizSplitter.split(questions, readOrNull { notes.readFileAt(sha, answerFile(topic)) } ?: "")
     }
 
     /**
-     * [sha] 판의 그 주제와 실제로 읽은 판의 SHA — 지금 판([head])이면 작업 트리에서 읽고(git 을 띄우지 않는다), 아니면 그 판에서,
-     * 그 판을 읽을 수 없으면 지금 판에서 읽는다. 질문 파일이 어디에도 없으면 null(없는 주제)
+     * [sha] 판의 그 주제와 실제로 읽은 판의 SHA — 그 판을 읽을 수 없으면 지금 판의 SHA 를 얻어 그 SHA 로 읽는다
+     * (지금 판이 [sha] 와 같으면 같은 판을 두 번 읽지 않는다). 어느 판에도 질문 파일이 없으면 null(없는 주제)
      */
-    private fun topicForSha(sha: String, head: String, topic: String): Pair<String, QuizSplitResult>? {
-        if (sha != head) topicAt(sha, topic)?.let { return sha to it }
-        return currentTopic(topic)?.let { head to it }
+    private fun topicForSha(sha: String, topic: String): Pair<String, QuizSplitResult>? {
+        topicAt(sha, topic)?.let { return sha to it }
+        val head = currentHead()
+        if (head == sha) return null
+        return topicAt(head, topic)?.let { head to it }
     }
 
     /**
@@ -209,9 +212,10 @@ class QuizService(
      * 같은 시도 번호로 다시 보낸 경우(다른 질문이어도) 처음 저장된 시도의 정답을 싣는 데 쓴다.
      */
     private fun answerOf(attempt: StoredAttempt): QuizAnswer? {
-        val content = topicForSha(attempt.contentSha, notes.currentHead().trim(), attempt.topicPath)?.second
+        val content = topicForSha(attempt.contentSha, attempt.topicPath)?.second
         val split = content as? QuizSplitResult.Split ?: return null
         val question = split.questions.firstOrNull { it.number == attempt.questionNumber } ?: return null
+        // 저장된 판을 못 읽어 지금 판으로 왔을 때 질문이 바뀌었으면 여기서 멈춘다 — 빼면 재전송에 답하지 않은 새 질문의 정답이 나간다
         return if (question.hash == attempt.questionHash) split.answerOf(attempt.questionNumber) else null
     }
 
@@ -227,10 +231,8 @@ class QuizService(
     /** 질문 목록 — 정답은 싣지 않는다. 쿠키가 있으면 그 주제의 시도만 읽어 상태를 붙인다(방문자를 만들지 않는다) */
     fun questions(requestId: String, presentedToken: String?, topicValue: String?): QuizOutcome<QuestionList> {
         val topic = topicValue?.takeIf(::isTopicPath) ?: return rejected(requestId, "questions", QuizRejection.INVALID_REQUEST, "topic")
-        val contentSha = notes.currentHead().trim()
-        // 단순화: SHA 를 먼저 읽고 파일을 읽는다 — 그 사이에 동기화가 끼면 SHA 는 앞 판 · 글은 새 판이 되어, 그 질문에 낸 답은
-        // "질문이 바뀌었습니다"(다시 받기)가 된다. 저장이 어긋나지는 않는다. 맞춰야 하면 파일도 그 SHA 로 읽는다(readFileAt).
-        val content = currentTopic(topic) ?: return rejected(requestId, "questions", QuizRejection.NOT_FOUND, "topic=$topic")
+        val contentSha = currentHead()
+        val content = topicAt(contentSha, topic) ?: return rejected(requestId, "questions", QuizRejection.NOT_FOUND, "topic=$topic")
         if (content is QuizSplitResult.Unsplittable) {
             requestLog.log(requestId, "quiz questions unavailable topic=$topic reason=${content.reason}")
             return QuizOutcome.Done(QuestionList(topic, contentSha, content, ProgressLoad.NONE, emptyList()))
@@ -250,7 +252,7 @@ class QuizService(
     /**
      * 답을 받아 저장하고 그 응답에 그 질문의 정답을 싣는다(명세 18.1 · 12).
      * 차례: 주제 꼴 → 시도 번호 · 질문 번호 · 빈 답 · NUL · 길이 → SHA · 해시의 꼴 → (쿠키가 있으면) 이미 저장된 이 방문자의 시도인가 →
-     * 내용 읽기(받은 SHA 의 판 — 지금 판이면 작업 트리, 못 읽으면 지금 판) → 판 확인(다시 낸 해시와 견줌) → 그다음에야 방문자 식별과 저장.
+     * 내용 읽기(받은 SHA 의 판, 못 읽으면 지금 판의 SHA 로) → 판 확인(다시 낸 해시와 견줌) → 그다음에야 방문자 식별과 저장.
      * 저장하는 판은 검증에 실제로 쓴 판이다(명세 20). 저장하지 못한 세 경우(장애 · 새 방문자 상한 · 하루 상한)에도 정답은 싣는다.
      */
     fun submitAnswer(requestId: String, presentedToken: String?, request: AnswerRequest): QuizOutcome<AnswerResult> {
@@ -281,10 +283,7 @@ class QuizService(
         }
 
         val subject = "topic=$topic question=$number"
-        // 단순화: 지금 판의 SHA 를 읽은 뒤 작업 트리를 읽는다 — 그 사이에 동기화가 끼면 새 글을 앞 판의 SHA 로 견주게 된다. 질문이
-        // 바뀌었으면 "질문이 바뀌었습니다"(다시 받기)가 되고, 같으면 같은 글이라 저장이 어긋나지 않는다. 맞춰야 하면 그 SHA 로 읽는다(readFileAt)
-        val head = notes.currentHead().trim()
-        val (versionSha, content) = topicForSha(contentSha, head, topic)
+        val (versionSha, content) = topicForSha(contentSha, topic)
             ?: return rejected(requestId, action, QuizRejection.NOT_FOUND, "topic=$topic")
         val split = content as? QuizSplitResult.Split ?: return rejected(requestId, action, QuizRejection.QUIZ_UNAVAILABLE, subject)
         val question = split.questions.firstOrNull { it.number == number }
@@ -339,7 +338,7 @@ class QuizService(
         val topic = topicValue?.takeIf(::isTopicPath) ?: return rejected(requestId, action, QuizRejection.INVALID_REQUEST, "topic")
         val number = numberValue?.takeIf(QUESTION_NUMBER::matches)?.toInt()
             ?: return rejected(requestId, action, QuizRejection.INVALID_REQUEST, "question number")
-        val content = currentTopic(topic) ?: return rejected(requestId, action, QuizRejection.NOT_FOUND, "topic=$topic")
+        val content = topicAt(currentHead(), topic) ?: return rejected(requestId, action, QuizRejection.NOT_FOUND, "topic=$topic")
         val split = content as? QuizSplitResult.Split ?: return rejected(requestId, action, QuizRejection.QUIZ_UNAVAILABLE, "topic=$topic")
         val question = split.questions.firstOrNull { it.number == number }
             ?: return rejected(requestId, action, QuizRejection.INVALID_REQUEST, "topic=$topic question=$number(no such question)")
@@ -373,9 +372,10 @@ class QuizService(
         var missingTopics = 0
         var unsplittableTopics = 0
         var missingQuestions = 0
+        val head = currentHead()
         attempts.takeLast(reviewAttemptLimit).groupBy { it.topicPath }.forEach { (topic, topicAttempts) ->
-            // 저장된 주제 경로도 꼴을 본 뒤에만 파일 경로로 쓴다
-            when (val content = if (isTopicPath(topic)) currentTopic(topic) else null) {
+            // 저장된 주제 경로도 꼴을 본 뒤에만 파일 경로로 쓴다. 주제마다 git 프로세스 둘 — 무거워지면 쪼갠 결과를 판과 주제로 기억한다
+            when (val content = if (isTopicPath(topic)) topicAt(head, topic) else null) {
                 null -> missingTopics += 1
                 is QuizSplitResult.Unsplittable -> unsplittableTopics += 1
                 is QuizSplitResult.Split -> topicAttempts.groupBy { it.questionNumber }.forEach { (number, questionAttempts) ->
