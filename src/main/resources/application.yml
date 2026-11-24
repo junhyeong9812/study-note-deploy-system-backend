@@ -14,3 +14,6 @@ management:
     web:
       exposure:
         include: health
+# 공부 기록 DB(study.db.url · user · password)는 여기 적지 않는다 — 환경 변수 STUDY_DB_URL · STUDY_DB_USER · STUDY_DB_PASSWORD 가
+# 그대로 그 키가 되고(스프링의 느슨한 이름 맞추기), 값이 없을 때의 기본은 ProgressConfiguration 에 있다(값이 없어도 앱은 뜬다).
+# 여기 적으면 이 파일이 SpringApplicationBuilder.properties 로 준 값(엔진 테스트)보다 앞서 그 값을 가린다(실측).

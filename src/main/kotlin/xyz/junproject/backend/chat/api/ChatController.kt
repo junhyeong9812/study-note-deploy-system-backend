@@ -1,10 +1,11 @@
 package xyz.junproject.backend.chat.api
 
-import jakarta.servlet.http.Cookie
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.servlet.http.HttpServletResponse
+import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
+import org.springframework.http.ResponseCookie
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.*
 import org.springframework.web.servlet.mvc.method.annotation.ResponseBodyEmitter
@@ -16,6 +17,7 @@ import xyz.junproject.backend.chat.usecase.LlmUnreachable
 import xyz.junproject.backend.content.domain.PathGuard
 import xyz.junproject.backend.shared.api.Envelope
 import xyz.junproject.backend.shared.infra.RequestLog
+import java.time.Duration
 import java.util.UUID
 import java.util.concurrent.CancellationException
 import java.util.concurrent.Executors
@@ -48,9 +50,10 @@ class ChatController(private val chatService: ChatService, private val requestLo
         val existing = request.cookies?.firstOrNull { it.name == "chat_session" }?.value
         if (existing != null && sessionPattern.matches(existing)) return existing
         val issued = UUID.randomUUID().toString()
-        response.addCookie(Cookie("chat_session", issued).apply {
-            isHttpOnly = true; path = "/"; maxAge = 60 * 60 * 24 * 30
-        })
+        // Servlet Cookie 로는 SameSite 를 붙일 수 없어 Set-Cookie 헤더로 낸다(명세 2.1 — Secure · SameSite=Lax 를 더함)
+        val cookie = ResponseCookie.from("chat_session", issued)
+            .httpOnly(true).secure(true).sameSite("Lax").path("/").maxAge(Duration.ofDays(30)).build()
+        response.addHeader(HttpHeaders.SET_COOKIE, cookie.toString())
         return issued
     }
 

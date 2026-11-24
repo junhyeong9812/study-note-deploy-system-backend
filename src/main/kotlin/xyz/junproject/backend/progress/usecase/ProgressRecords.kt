@@ -42,6 +42,8 @@ interface ProgressRecords {
     fun touchVisit(visitorId: Long, today: LocalDate)
     /** 같은 attemptId 가 이미 이 방문자의 것이면 그 줄을 그대로 돌려준다. 다른 방문자의 것이면 null */
     fun recordAttempt(visitorId: Long, submission: AnswerSubmission, submittedAt: Instant): StoredAttempt?
+    /** 이 방문자의 그 시도(채점 포함) — 없거나 남의 것이면 null. 하루 상한에 닿은 뒤의 재전송을 알아보는 데 쓴다 */
+    fun findAttempt(visitorId: Long, attemptId: UUID): StoredAttempt?
     /** 이 방문자의 시도가 아니면 null. 이미 채점했으면 첫 채점을 그대로 둔 채 돌려준다 */
     fun recordGrade(visitorId: Long, attemptId: UUID, grade: Grade, gradedAt: Instant): StoredAttempt?
     /** 낸 시각 오름차순 */

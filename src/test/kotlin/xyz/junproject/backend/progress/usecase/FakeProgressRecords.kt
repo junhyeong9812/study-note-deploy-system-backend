@@ -55,6 +55,11 @@ class FakeProgressRecords : ProgressRecords {
         return stored
     }
 
+    override fun findAttempt(visitorId: Long, attemptId: UUID): StoredAttempt? {
+        call("findAttempt")
+        return if (attemptOwners[attemptId] == visitorId) attempts[attemptId] else null
+    }
+
     override fun recordGrade(visitorId: Long, attemptId: UUID, grade: Grade, gradedAt: Instant): StoredAttempt? {
         call("recordGrade")
         if (attemptOwners[attemptId] != visitorId) return null
