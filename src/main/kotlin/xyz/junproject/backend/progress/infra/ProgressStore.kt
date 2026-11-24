@@ -65,6 +65,8 @@ class ProgressStore(
             )
             """,
             "CREATE INDEX IF NOT EXISTS quiz_attempt_visitor_submitted ON quiz_attempt (visitor_id, submitted_at)",
+            // 주제 단위 읽기(질문 목록 · 다시 보기) — IF NOT EXISTS 라 이미 있는 DB 에도 다음 기동의 표 준비가 붙인다(명세 18.2)
+            "CREATE INDEX IF NOT EXISTS quiz_attempt_visitor_topic ON quiz_attempt (visitor_id, topic_path)",
             """
             CREATE TABLE IF NOT EXISTS quiz_grade (
                 attempt_id UUID PRIMARY KEY REFERENCES quiz_attempt (attempt_id) ON DELETE CASCADE,
@@ -282,12 +284,22 @@ class ProgressStore(
     override fun attemptsOf(visitorId: Long): List<AttemptSummary> =
         reach { database -> database.query("SELECT $SUMMARY_COLUMNS WHERE a.visitor_id = ? ORDER BY a.submitted_at, a.attempt_id", summaryRow, visitorId) }
 
-    // 뼈대 — task 03b 의 구현 워커가 채운다(계약은 ProgressRecords 의 주석 · QuizRecordsEngineTest)
-    override fun attemptsOfTopic(visitorId: Long, topicPath: String): List<AttemptSummary> = TODO("03b")
+    override fun attemptsOfTopic(visitorId: Long, topicPath: String): List<AttemptSummary> =
+        reach { database -> database.query(
+            "SELECT $SUMMARY_COLUMNS WHERE a.visitor_id = ? AND a.topic_path = ? ORDER BY a.submitted_at, a.attempt_id",
+            summaryRow, visitorId, topicPath) }
 
-    override fun attemptsOfQuestion(visitorId: Long, topicPath: String, questionNumber: Int): List<StoredAttempt> = TODO("03b")
+    /** 답 본문을 읽는 것은 이 함수뿐이다 — 질문 하나 단위(명세 16) */
+    override fun attemptsOfQuestion(visitorId: Long, topicPath: String, questionNumber: Int): List<StoredAttempt> =
+        reach { database -> database.query(
+            "SELECT $ATTEMPT_COLUMNS WHERE a.visitor_id = ? AND a.topic_path = ? AND a.question_number = ? ORDER BY a.submitted_at, a.attempt_id",
+            attemptRow, visitorId, topicPath, questionNumber) }
 
-    override fun recentAttemptsOf(visitorId: Long, limit: Int): List<AttemptSummary> = TODO("03b")
+    /** 최근 것부터 [limit] 줄을 읽어 낸 시각 오름차순으로 돌려준다 */
+    override fun recentAttemptsOf(visitorId: Long, limit: Int): List<AttemptSummary> =
+        reach { database -> database.query(
+            "SELECT $SUMMARY_COLUMNS WHERE a.visitor_id = ? ORDER BY a.submitted_at DESC, a.attempt_id DESC LIMIT ?",
+            summaryRow, visitorId, limit).asReversed() }
 
     override fun countAttemptsBetween(visitorId: Long, from: Instant, until: Instant): Int =
         reach { database -> database.queryForObject(

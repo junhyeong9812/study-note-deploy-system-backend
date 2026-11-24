@@ -5,7 +5,6 @@ import jakarta.servlet.http.HttpServletResponse
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
-import org.springframework.http.ResponseCookie
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.*
 import org.springframework.web.servlet.mvc.method.annotation.ResponseBodyEmitter
@@ -17,7 +16,6 @@ import xyz.junproject.backend.chat.usecase.LlmUnreachable
 import xyz.junproject.backend.content.domain.PathGuard
 import xyz.junproject.backend.shared.api.Envelope
 import xyz.junproject.backend.shared.infra.RequestLog
-import java.time.Duration
 import java.util.UUID
 import java.util.concurrent.CancellationException
 import java.util.concurrent.Executors
@@ -44,16 +42,12 @@ class ChatController(private val chatService: ChatService, private val requestLo
         // 한글이 변환기 기본 문자셋(ISO-8859-1)에 깨지지 않게 문자셋을 명시한다
         val UTF8_TEXT = MediaType("text", "plain", Charsets.UTF_8)
     }
-    private val sessionPattern = Regex("^[0-9a-f-]{36}$")
-
     private fun sessionOf(request: HttpServletRequest, response: HttpServletResponse): String {
-        val existing = request.cookies?.firstOrNull { it.name == "chat_session" }?.value
-        if (existing != null && sessionPattern.matches(existing)) return existing
+        val existing = request.cookies?.firstOrNull { it.name == ChatSessionCookie.NAME }?.value
+        if (existing != null && ChatService.isSessionId(existing)) return existing
         val issued = UUID.randomUUID().toString()
         // Servlet Cookie 로는 SameSite 를 붙일 수 없어 Set-Cookie 헤더로 낸다(명세 2.1 — Secure · SameSite=Lax 를 더함)
-        val cookie = ResponseCookie.from("chat_session", issued)
-            .httpOnly(true).secure(true).sameSite("Lax").path("/").maxAge(Duration.ofDays(30)).build()
-        response.addHeader(HttpHeaders.SET_COOKIE, cookie.toString())
+        response.addHeader(HttpHeaders.SET_COOKIE, ChatSessionCookie.issue(issued).toString())
         return issued
     }
 

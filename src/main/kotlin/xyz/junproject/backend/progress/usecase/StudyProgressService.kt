@@ -26,6 +26,8 @@ sealed interface SubmitOutcome {
     data object DailyLimitReached : SubmitOutcome
     /** 같은 시도 번호를 다른 방문자가 이미 씀 */
     data object AttemptIdTaken : SubmitOutcome
+    /** 모르는 방문자(쿠키 없음 · 모르는 토큰)의 첫 답인데 새 방문자 발급의 상한에 닿음 — 저장하지 않고 토큰도 만들지 않는다(명세 18.2) */
+    data object NewVisitorRateLimited : SubmitOutcome
     data object StorageUnavailable : SubmitOutcome
 }
 
@@ -50,6 +52,13 @@ sealed interface DeleteOutcome {
 sealed interface AttemptsOutcome {
     data class Listed(val attempts: List<AttemptSummary>) : AttemptsOutcome
     data object StorageUnavailable : AttemptsOutcome
+}
+
+/** 방문자의 기록 읽기(명세 15 · 18.2) — 읽음 / 방문자 없음(쿠키 없음 · 모르는 토큰, 방문자를 만들지 않는다) / 저장소 사용 불가 */
+sealed interface VisitorRead<out T> {
+    data class Read<T>(val value: T) : VisitorRead<T>
+    data object NoVisitor : VisitorRead<Nothing>
+    data object StorageUnavailable : VisitorRead<Nothing>
 }
 
 sealed interface PurgeOutcome {
@@ -111,8 +120,14 @@ class StudyProgressService(
      * 답을 덧붙인다. 입력 검사(NUL · 길이)가 먼저(저장소 · 토큰 발급에 닿기 전), 모르는 방문자면 여기서 처음 토큰을 발급하고
      * 방문자 줄과 시도를 한 묶음으로 넣는다(명세 15 — 시도가 저장되지 않으면 방문자 줄도 남지 않는다).
      * 확인 불가(DB 오류)면 발급하지 않는다. 로그에는 주제 · 질문 번호 · 길이 · 결과만 — 답의 본문 · 토큰은 쓰지 않는다.
+     * [admitNewVisitor] 는 모르는 방문자로 확인된 뒤에만 부른다(새 방문자 발급의 상한 — 아는 방문자 · 확인 불가는 세지 않는다).
      */
-    fun submitAnswer(requestId: String, presentedToken: String?, submission: AnswerSubmission): SubmitOutcome {
+    fun submitAnswer(
+        requestId: String,
+        presentedToken: String?,
+        submission: AnswerSubmission,
+        admitNewVisitor: () -> Boolean = { true },
+    ): SubmitOutcome {
         val subject = "topic=${submission.topicPath} question=${submission.questionNumber}"
         val length = submission.answer.codePointCount(0, submission.answer.length)
         // PostgreSQL 의 글 칸은 NUL 을 담지 못한다 — 저장소 장애가 아니라 잘못된 입력이다(그래서 ERROR 로 남기지 않는다)
@@ -132,6 +147,10 @@ class StudyProgressService(
                 is VisitorLookup.Found -> lookup.visitor
                 VisitorLookup.Unavailable -> return SubmitOutcome.StorageUnavailable
                 VisitorLookup.Unknown -> {
+                    if (!admitNewVisitor()) {
+                        requestLog.log(requestId, "progress answer rejected(new visitor rate limited) $subject length=$length", "warning")
+                        return SubmitOutcome.NewVisitorRateLimited
+                    }
                     val token = issueToken()
                     val stored = records.recordFirstAttempt(VisitorToken.hash(token), today, submission, now)
                     if (stored == null) {
@@ -180,6 +199,33 @@ class StudyProgressService(
             AttemptsOutcome.StorageUnavailable
         }
     }
+
+    /** 쿠키의 방문자로 [work] 를 읽는다 — 방문자를 만들지 않고, DB 오류는 결과로(명세 15) */
+    private fun <T> readFor(requestId: String, presentedToken: String?, action: String, work: (Visitor) -> T): VisitorRead<T> {
+        val visitor = when (val lookup = identify(requestId, presentedToken)) {
+            is VisitorLookup.Found -> lookup.visitor
+            VisitorLookup.Unknown -> return VisitorRead.NoVisitor
+            VisitorLookup.Unavailable -> return VisitorRead.StorageUnavailable
+        }
+        return try {
+            VisitorRead.Read(work(visitor))
+        } catch (error: DataAccessException) {
+            logStorageFailure(requestId, action, error)
+            VisitorRead.StorageUnavailable
+        }
+    }
+
+    /** 그 주제의 시도만(본문 없이, 낸 시각 차례) — 질문 목록의 상태 계산(명세 18.2) */
+    fun attemptsOfTopic(requestId: String, presentedToken: String?, topicPath: String): VisitorRead<List<AttemptSummary>> =
+        readFor(requestId, presentedToken, "list topic attempts") { visitor -> records.attemptsOfTopic(visitor.id, topicPath) }
+
+    /** 그 질문 하나의 시도(답 본문 포함, 낸 시각 차례) — 다시 보기(명세 16 · 18.1) */
+    fun attemptsOfQuestion(requestId: String, presentedToken: String?, topicPath: String, questionNumber: Int): VisitorRead<List<StoredAttempt>> =
+        readFor(requestId, presentedToken, "list question attempts") { visitor -> records.attemptsOfQuestion(visitor.id, topicPath, questionNumber) }
+
+    /** 가장 최근 시도 [limit] 줄까지(본문 없이, 낸 시각 차례) — 복습 목록(명세 18.2) */
+    fun recentAttempts(requestId: String, presentedToken: String?, limit: Int): VisitorRead<List<AttemptSummary>> =
+        readFor(requestId, presentedToken, "list recent attempts") { visitor -> records.recentAttemptsOf(visitor.id, limit) }
 
     /** 스스로 고른 결과를 그 시도에 덧붙인다 — 모르는 방문자는 만들지 않는다 */
     fun grade(requestId: String, presentedToken: String?, attemptId: UUID, grade: Grade): GradeOutcome {
