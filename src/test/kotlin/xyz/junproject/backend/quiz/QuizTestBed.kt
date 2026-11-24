@@ -93,6 +93,8 @@ class FakeChatHistory : ChatHistoryPort {
 object QuizContent {
     const val HEAD = "1111111111111111111111111111111111111111"
     const val OLD_SHA = "2222222222222222222222222222222222222222"
+    /** 내용이 바뀐 뒤의 새 판 */
+    const val NEW_SHA = "4444444444444444444444444444444444444444"
     /** 얕은 사본에 없는(읽을 수 없는) SHA */
     const val UNREADABLE_SHA = "3333333333333333333333333333333333333333"
 

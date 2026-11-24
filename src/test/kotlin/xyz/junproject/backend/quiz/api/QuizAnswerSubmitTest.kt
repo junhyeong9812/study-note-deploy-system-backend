@@ -329,6 +329,27 @@ class QuizAnswerSubmitTest {
     }
 
     @Test
+    fun `받은 SHA 가 지금 판이면 git 을 띄우지 않고 작업 트리에서 읽는다`() {
+        val response = bed.submit(bed.answerBody(contentSha = QuizContent.HEAD))
+        assertEquals(true, bed.data(response)["saved"], response.contentAsString)
+        assertEquals(emptyList<Pair<String, String>>(), bed.notes.readsAt, "지금 판인데 readFileAt(git) 을 불렀다")
+        assertTrue("$TOPIC/1-question.md" in bed.notes.reads, bed.notes.reads.toString())
+    }
+
+    @Test
+    fun `받은 SHA 가 지금 판이 아니면 그 판에서 읽는다`() {
+        bed.submit(bed.answerBody(contentSha = QuizContent.OLD_SHA, questionHash = QuizContent.oldQuestionTwoHash))
+        assertTrue((QuizContent.OLD_SHA to "$TOPIC/1-question.md") in bed.notes.readsAt, bed.notes.readsAt.toString())
+    }
+
+    @Test
+    fun `받은 SHA 를 읽지 못해 지금 판으로 견줘 저장했으면 지금 판의 SHA 를 저장한다`() {
+        val response = bed.submit(bed.answerBody(contentSha = QuizContent.UNREADABLE_SHA, questionHash = QuizContent.hashOf(TOPIC, 2)))
+        assertEquals(true, bed.data(response)["saved"], response.contentAsString)
+        assertEquals(QuizContent.HEAD, bed.fake.attempts.values.single().contentSha)
+    }
+
+    @Test
     fun `어느 판에도 없는 해시는 question_changed 다`() {
         val response = bed.submit(bed.answerBody(questionHash = QuizContent.UNKNOWN_HASH))
         assertEquals(409, response.status)

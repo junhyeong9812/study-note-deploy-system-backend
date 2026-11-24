@@ -85,6 +85,32 @@ class NewVisitorRateLimitTest {
     }
 
     @Test
+    fun `이미 쓰인 시도 번호로 쿠키 없이 되풀이한 첫 답은 한도를 쓰지 않는다`() {
+        val (_, owner) = bed.knownVisitor()
+        val taken = bed.putAttempt(owner, xyz.junproject.backend.quiz.QuizContent.TOPIC, 2, QuizTestBed.NOW)
+        repeat(5) { index ->
+            val response = bed.submit(bed.answerBody(attemptId = taken.toString()))
+            assertEquals(409, response.status, "${index + 1}번째: ${response.contentAsString}")
+            assertEquals("attempt_id_taken", bed.errorCode(response))
+        }
+        repeat(3) { index -> assertEquals(true, bed.data(submitWithoutCookie())["saved"], "진짜 첫 답 ${index + 1}") }
+        assertLimited(submitWithoutCookie())
+    }
+
+    @Test
+    fun `저장소 장애로 실패한 첫 답은 한도를 쓰지 않는다`() {
+        bed.fake.failing += "recordFirstAttempt"
+        repeat(5) { index ->
+            val data = bed.data(submitWithoutCookie())
+            assertEquals(false, data["saved"])
+            assertEquals("storage_unavailable", data["not_saved_reason"], "${index + 1}번째")
+        }
+        bed.fake.failing.clear()
+        repeat(3) { index -> assertEquals(true, bed.data(submitWithoutCookie())["saved"], "회복 뒤 첫 답 ${index + 1}") }
+        assertLimited(submitWithoutCookie())
+    }
+
+    @Test
     fun `기본 상한은 분당 30 이다`() {
         assertEquals(30, QuizService.NEW_VISITORS_PER_MINUTE)
         QuizTestBed().use { defaultBed ->
