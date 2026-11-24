@@ -56,6 +56,10 @@ interface ProgressRecords {
     /** 표 만들기 — 여러 번 · 두 자리가 동시에 돌아도 안전하다 */
     fun createSchema()
     fun findVisitor(tokenHash: String): Visitor?
+    /**
+     * 방문자 줄만 만든다 — 서비스는 부르지 않는다(첫 답은 [recordFirstAttempt] 가 방문자와 시도를 한 묶음으로 넣는다).
+     * 방문자 줄만 따로 만들면 "첫 답에서만 발급 · 첫 답은 한 묶음"을 벗어난다. 테스트의 준비 단계가 쓴다.
+     */
     fun createVisitor(tokenHash: String, today: LocalDate, now: Instant): Visitor
     fun touchVisit(visitorId: Long, today: LocalDate)
     /** 같은 attemptId 가 이미 이 방문자의 것이면 그 줄을 그대로 돌려준다. 다른 방문자의 것이면 null */

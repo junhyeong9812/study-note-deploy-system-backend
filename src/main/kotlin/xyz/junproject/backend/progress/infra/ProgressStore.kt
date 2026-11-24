@@ -23,13 +23,13 @@ import java.util.UUID
 /**
  * PostgreSQL 저장소 — 표 study_visitor · quiz_attempt · quiz_grade.
  * 표는 처음 닿을 때 만든다(만들기에 성공하기 전까지는 호출마다 다시 시도한다) — 뜬 직후의 미리 만들기는 설정이 부른다.
- * DB 에 연결을 만들지 못하면 [unavailablePause] 동안은 DB 에 닿아 보지 않고 곧바로 실패한다(명세 15 · 16) — 요청마다 풀 대기(2초)를 치르지 않게.
+ * DB 에 닿지 못하면([couldNotConnect]) [unavailablePause] 동안은 DB 에 닿아 보지 않고 곧바로 실패한다(명세 15 · 16) — 요청마다 풀 대기(2초)를 치르지 않게.
  * 풀이 바닥나 기다리다 넘은 것 · SQL 오류는 그 요청만 실패한다(쉼을 걸지 않는다). 쉼은 흐른 시간([nanoTime])으로 잰다.
  * 시도 · 채점은 덧붙이기만 한다: 같은 번호는 `ON CONFLICT DO NOTHING` 뒤 다시 읽는다(고치지 않는다).
  */
 class ProgressStore(
     private val jdbc: JdbcTemplate,
-    /** DB 에 연결을 만들지 못한 직후 이 동안은 풀을 기다리지 않고 곧바로 DataAccessException 으로 실패한다(명세 15 — 짧은 쉼) */
+    /** DB 에 닿지 못한([couldNotConnect]) 직후 이 동안은 풀을 기다리지 않고 곧바로 DataAccessException 으로 실패한다(명세 15 — 짧은 쉼) */
     private val unavailablePause: Duration = Duration.ofSeconds(5),
     /** 쉼을 재는 흐른 시간(나노초, System.nanoTime 꼴 — 명세 16). 벽시계가 뒤로 가도 쉼이 길어지지 않는다 */
     private val nanoTime: () -> Long = System::nanoTime,
@@ -162,11 +162,11 @@ class ProgressStore(
     }
 
     @Volatile private var schemaReady = false
-    /** 연결을 만들지 못한 때의 [nanoTime] — 그때부터 [unavailablePause] 동안은 DB 에 닿아 보지 않는다. null 이면 쉬지 않는다 */
+    /** DB 에 닿지 못한([couldNotConnect]) 때의 [nanoTime] — 그때부터 [unavailablePause] 동안은 DB 에 닿아 보지 않는다. null 이면 쉬지 않는다 */
     @Volatile private var pausedAtNanos: Long? = null
 
     /**
-     * DB 에 닿는 모든 일의 입구 — 쉼 동안이면 곧바로 실패하고(쉼을 늘리지 않는다), 연결을 만들지 못했으면 쉼을 건다.
+     * DB 에 닿는 모든 일의 입구 — 쉼 동안이면 곧바로 실패하고(쉼을 늘리지 않는다), DB 에 닿지 못했으면([couldNotConnect]) 쉼을 건다.
      * 쉼은 [couldNotConnect] 에만 건다 — 풀 바닥에 걸면 DB 가 멀쩡해도 바쁜 순간마다 모든 기록 요청이 쉼 동안 실패하고(실측),
      * 키 충돌 같은 SQL 오류에 걸면 잘못된 요청 하나가 모든 기록 요청을 막는다.
      */
