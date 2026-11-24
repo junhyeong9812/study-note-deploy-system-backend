@@ -121,12 +121,14 @@ class StudyProgressService(
      * 방문자 줄과 시도를 한 묶음으로 넣는다(명세 15 — 시도가 저장되지 않으면 방문자 줄도 남지 않는다).
      * 확인 불가(DB 오류)면 발급하지 않는다. 로그에는 주제 · 질문 번호 · 길이 · 결과만 — 답의 본문 · 토큰은 쓰지 않는다.
      * [admitNewVisitor] 는 모르는 방문자로 확인된 뒤에만 부른다(새 방문자 발급의 상한 — 아는 방문자 · 확인 불가는 세지 않는다).
+     * 받은 칸은 방문자 줄이 실제로 만들어졌을 때만 쓴다 — 첫 답이 저장되지 않으면(이미 쓰인 시도 번호 · DB 오류) [releaseNewVisitor] 로 돌려준다(명세 20).
      */
     fun submitAnswer(
         requestId: String,
         presentedToken: String?,
         submission: AnswerSubmission,
         admitNewVisitor: () -> Boolean = { true },
+        releaseNewVisitor: () -> Unit = {},
     ): SubmitOutcome {
         val subject = "topic=${submission.topicPath} question=${submission.questionNumber}"
         val length = submission.answer.codePointCount(0, submission.answer.length)
@@ -152,8 +154,14 @@ class StudyProgressService(
                         return SubmitOutcome.NewVisitorRateLimited
                     }
                     val token = issueToken()
-                    val stored = records.recordFirstAttempt(VisitorToken.hash(token), today, submission, now)
+                    val stored = try {
+                        records.recordFirstAttempt(VisitorToken.hash(token), today, submission, now)
+                    } catch (error: DataAccessException) {
+                        releaseNewVisitor()
+                        throw error
+                    }
                     if (stored == null) {
+                        releaseNewVisitor()
                         requestLog.log(requestId, "progress answer rejected(attempt id taken) $subject newVisitor=true", "warning")
                         return SubmitOutcome.AttemptIdTaken
                     }
@@ -222,6 +230,10 @@ class StudyProgressService(
     /** 그 질문 하나의 시도(답 본문 포함, 낸 시각 차례) — 다시 보기(명세 16 · 18.1) */
     fun attemptsOfQuestion(requestId: String, presentedToken: String?, topicPath: String, questionNumber: Int): VisitorRead<List<StoredAttempt>> =
         readFor(requestId, presentedToken, "list question attempts") { visitor -> records.attemptsOfQuestion(visitor.id, topicPath, questionNumber) }
+
+    /** 이 방문자의 그 시도(없거나 남의 것이면 null) — 이미 저장된 시도의 재전송을 판 확인보다 먼저 알아보는 데 쓴다(명세 20) */
+    fun ownAttempt(requestId: String, presentedToken: String?, attemptId: UUID): VisitorRead<StoredAttempt?> =
+        readFor(requestId, presentedToken, "find attempt") { visitor -> records.findAttempt(visitor.id, attemptId) }
 
     /** 가장 최근 시도 [limit] 줄까지(본문 없이, 낸 시각 차례) — 복습 목록(명세 18.2) */
     fun recentAttempts(requestId: String, presentedToken: String?, limit: Int): VisitorRead<List<AttemptSummary>> =

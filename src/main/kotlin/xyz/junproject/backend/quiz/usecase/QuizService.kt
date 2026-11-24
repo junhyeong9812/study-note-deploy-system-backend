@@ -145,19 +145,25 @@ class QuizService(
     private var newVisitorsThisMinute = 0
 
     /**
-     * 새 방문자를 하나 더 받아도 되나 — 시계의 분(고정 창)마다 [newVisitorsPerMinute] 명까지. 받으면 센다.
+     * 새 방문자의 칸을 하나 받는다 — 시계의 분(고정 창)마다 [newVisitorsPerMinute] 칸까지. 받으면 그 분을, 다 찼으면 null.
+     * 칸을 먼저 받고 저장에 실패하면 [releaseNewVisitor] 로 돌려준다 — 동시에 몰려도 상한을 넘지 않는다.
      * 단순화: 이 앱 하나의 메모리에서 센다 — 두 자리(blue · green)가 함께 받으면 앱 전체로는 분당 상한의 2배까지, 창의 경계 앞뒤로
      * 몰리면 1분 안에 다시 2배까지 받는다. 정확히 막아야 하면 DB(또는 Redis)의 한 곳에서 센다.
      */
-    private fun admitNewVisitor(): Boolean = synchronized(newVisitorLock) {
+    private fun reserveNewVisitor(): Long? = synchronized(newVisitorLock) {
         val minute = Math.floorDiv(clock.instant().epochSecond, 60L)
         if (minute != newVisitorMinute) {
             newVisitorMinute = minute
             newVisitorsThisMinute = 0
         }
-        if (newVisitorsThisMinute >= newVisitorsPerMinute) return false
+        if (newVisitorsThisMinute >= newVisitorsPerMinute) return null
         newVisitorsThisMinute += 1
-        true
+        minute
+    }
+
+    /** 받은 칸을 돌려준다 — 그 칸을 받은 분이 지금도 세는 분일 때만(다음 분의 칸을 건드리지 않는다) */
+    private fun releaseNewVisitor(reservedMinute: Long) = synchronized(newVisitorLock) {
+        if (reservedMinute == newVisitorMinute && newVisitorsThisMinute > 0) newVisitorsThisMinute -= 1
     }
 
     private fun today() = ReviewSchedule.dateOf(clock.instant())
@@ -183,18 +189,27 @@ class QuizService(
         return QuizSplitter.split(questions, readOrNull { notes.readFile(answerFile(topic)) } ?: "")
     }
 
-    /** [sha] 판의 그 주제 — 그 판을 읽을 수 없으면(얕은 사본 · 없는 SHA · 그때 없던 주제) null. [sha] 는 [COMMIT_SHA] 를 통과한 값 */
+    /** [sha] 판의 그 주제(git) — 그 판을 읽을 수 없으면(얕은 사본 · 없는 SHA · 그때 없던 주제) null. [sha] 는 [COMMIT_SHA] 를 통과한 값 */
     private fun topicAt(sha: String, topic: String): QuizSplitResult? {
         val questions = readOrNull { notes.readFileAt(sha, questionFile(topic)) } ?: return null
         return QuizSplitter.split(questions, readOrNull { notes.readFileAt(sha, answerFile(topic)) } ?: "")
     }
 
     /**
+     * [sha] 판의 그 주제와 실제로 읽은 판의 SHA — 지금 판([head])이면 작업 트리에서 읽고(git 을 띄우지 않는다), 아니면 그 판에서,
+     * 그 판을 읽을 수 없으면 지금 판에서 읽는다. 질문 파일이 어디에도 없으면 null(없는 주제)
+     */
+    private fun topicForSha(sha: String, head: String, topic: String): Pair<String, QuizSplitResult>? {
+        if (sha != head) topicAt(sha, topic)?.let { return sha to it }
+        return currentTopic(topic)?.let { head to it }
+    }
+
+    /**
      * 저장된 시도의 정답 — 그 시도의 판에서(읽을 수 없으면 지금 판에서) 같은 번호 · 같은 해시의 질문일 때만. 아니면 null.
-     * 같은 시도 번호로 다른 질문을 다시 보낸 경우 처음 저장된 시도의 정답을 싣는 데 쓴다.
+     * 같은 시도 번호로 다시 보낸 경우(다른 질문이어도) 처음 저장된 시도의 정답을 싣는 데 쓴다.
      */
     private fun answerOf(attempt: StoredAttempt): QuizAnswer? {
-        val content = topicAt(attempt.contentSha, attempt.topicPath) ?: currentTopic(attempt.topicPath)
+        val content = topicForSha(attempt.contentSha, notes.currentHead().trim(), attempt.topicPath)?.second
         val split = content as? QuizSplitResult.Split ?: return null
         val question = split.questions.firstOrNull { it.number == attempt.questionNumber } ?: return null
         return if (question.hash == attempt.questionHash) split.answerOf(attempt.questionNumber) else null
@@ -234,8 +249,9 @@ class QuizService(
 
     /**
      * 답을 받아 저장하고 그 응답에 그 질문의 정답을 싣는다(명세 18.1 · 12).
-     * 차례: 주제 꼴 → 시도 번호 · 질문 번호 · 빈 답 · NUL · 길이 → SHA · 해시의 꼴 → 내용 읽기(받은 SHA 의 판, 못 읽으면 지금 판) →
-     * 판 확인(다시 낸 해시와 견줌) → 그다음에야 방문자 식별과 저장. 저장하지 못한 세 경우(장애 · 새 방문자 상한 · 하루 상한)에도 정답은 싣는다.
+     * 차례: 주제 꼴 → 시도 번호 · 질문 번호 · 빈 답 · NUL · 길이 → SHA · 해시의 꼴 → (쿠키가 있으면) 이미 저장된 이 방문자의 시도인가 →
+     * 내용 읽기(받은 SHA 의 판 — 지금 판이면 작업 트리, 못 읽으면 지금 판) → 판 확인(다시 낸 해시와 견줌) → 그다음에야 방문자 식별과 저장.
+     * 저장하는 판은 검증에 실제로 쓴 판이다(명세 20). 저장하지 못한 세 경우(장애 · 새 방문자 상한 · 하루 상한)에도 정답은 싣는다.
      */
     fun submitAnswer(requestId: String, presentedToken: String?, request: AnswerRequest): QuizOutcome<AnswerResult> {
         val action = "answer"
@@ -253,21 +269,42 @@ class QuizService(
         val questionHash = request.questionHash?.takeIf(QUESTION_HASH::matches)
             ?: return rejected(requestId, action, QuizRejection.INVALID_REQUEST, "question hash")
 
+        // 이미 저장된 이 방문자의 시도면(응답을 잃은 재전송) 판 확인 없이 처음 저장된 것을 돌려준다 — 그 사이 질문이 바뀌었거나
+        // 그 판을 더는 읽을 수 없어도(명세 20). 쿠키가 없거나 모르는 토큰 · 남의 시도 번호 · 저장소 장애는 아래의 길로 간다
+        if (presentedToken != null) {
+            val own = progress.ownAttempt(requestId, presentedToken, attemptId)
+            if (own is VisitorRead.Read && own.value != null) {
+                val stored = own.value
+                requestLog.log(requestId, "quiz answer retransmission topic=${stored.topicPath} question=${stored.questionNumber}")
+                return QuizOutcome.Done(AnswerResult(stored, null, answerOf(stored), presentedToken))
+            }
+        }
+
         val subject = "topic=$topic question=$number"
-        val content = topicAt(contentSha, topic) ?: currentTopic(topic) ?: return rejected(requestId, action, QuizRejection.NOT_FOUND, "topic=$topic")
+        // 단순화: 지금 판의 SHA 를 읽은 뒤 작업 트리를 읽는다 — 그 사이에 동기화가 끼면 새 글을 앞 판의 SHA 로 견주게 된다. 질문이
+        // 바뀌었으면 "질문이 바뀌었습니다"(다시 받기)가 되고, 같으면 같은 글이라 저장이 어긋나지 않는다. 맞춰야 하면 그 SHA 로 읽는다(readFileAt)
+        val head = notes.currentHead().trim()
+        val (versionSha, content) = topicForSha(contentSha, head, topic)
+            ?: return rejected(requestId, action, QuizRejection.NOT_FOUND, "topic=$topic")
         val split = content as? QuizSplitResult.Split ?: return rejected(requestId, action, QuizRejection.QUIZ_UNAVAILABLE, subject)
         val question = split.questions.firstOrNull { it.number == number }
             ?: return rejected(requestId, action, QuizRejection.INVALID_REQUEST, "$subject(no such question)")
         if (question.hash != questionHash) return rejected(requestId, action, QuizRejection.QUESTION_CHANGED, subject)
         val correctAnswer = checkNotNull(split.answerOf(number)) { "쪼개진 주제의 질문에 정답이 없다" }
 
-        val submission = AnswerSubmission(attemptId, topic, number, answer, contentSha, questionHash)
+        val submission = AnswerSubmission(attemptId, topic, number, answer, versionSha, questionHash)
         val notSaved = { reason: NotSavedReason -> QuizOutcome.Done(AnswerResult(null, reason, correctAnswer, null)) }
-        return when (val outcome = progress.submitAnswer(requestId, presentedToken, submission, ::admitNewVisitor)) {
+        var reservedMinute: Long? = null
+        val admitThisVisitor = { reserveNewVisitor().also { minute -> reservedMinute = minute } != null }
+        val releaseThisVisitor = {
+            reservedMinute?.let { minute -> releaseNewVisitor(minute) }
+            reservedMinute = null
+        }
+        return when (val outcome = progress.submitAnswer(requestId, presentedToken, submission, admitThisVisitor, releaseThisVisitor)) {
             is SubmitOutcome.Saved -> {
                 val stored = outcome.attempt
                 val sameQuestion = stored.topicPath == topic && stored.questionNumber == number &&
-                    stored.contentSha == contentSha && stored.questionHash == questionHash
+                    stored.contentSha == versionSha && stored.questionHash == questionHash
                 // 같은 시도 번호로 다른 질문을 다시 보냈으면 처음 저장된 시도의 정답이다(시도 번호가 기준 — 명세 19)
                 QuizOutcome.Done(AnswerResult(stored, null, if (sameQuestion) correctAnswer else answerOf(stored), outcome.cookieToken))
             }
