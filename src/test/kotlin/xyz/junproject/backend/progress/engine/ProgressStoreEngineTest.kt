@@ -1,0 +1,316 @@
+package xyz.junproject.backend.progress.engine
+
+import org.junit.jupiter.api.AfterAll
+import org.junit.jupiter.api.Assertions.*
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Tag
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.TestInstance
+import org.springframework.jdbc.core.JdbcTemplate
+import xyz.junproject.backend.progress.domain.Grade
+import xyz.junproject.backend.progress.infra.ProgressStore
+import xyz.junproject.backend.progress.usecase.AnswerSubmission
+import java.time.Instant
+import java.time.LocalDate
+import java.util.UUID
+import java.util.concurrent.Callable
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+
+/**
+ * 실제 PostgreSQL — 명세 2.2 · 11.2 의 저장소 계약: 표 만들기가 두 번 · 두 자리에서 돌아도 안전, 시도 · 채점은 덧붙이기만
+ * (어느 줄도 고쳐지지 않음 — 줄의 xmin 으로 본다), 같은 시도 번호는 한 줄, 방문자별 조회 · 세기 · 지우기, 1년 보관 삭제의 경계.
+ * 각 사례는 빈 전용 스키마(`progress_engine`)에서 돈다. 표 이름(study_visitor · quiz_attempt · quiz_grade)은 계약이다.
+ */
+@Tag("engine")
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+class ProgressStoreEngineTest {
+    private val schema = "progress_engine"
+    private val administration = EngineSupport.administration()
+    private val administrationJdbc = JdbcTemplate(administration)
+    private val blue = EngineSupport.schemaPool(schema)
+    private val green = EngineSupport.schemaPool(schema)
+    private val jdbc = JdbcTemplate(blue)
+    private val store = ProgressStore(jdbc)
+    private val greenStore = ProgressStore(JdbcTemplate(green))
+    private val now = Instant.parse("2026-11-25T01:00:00Z")
+    private val today = LocalDate.of(2026, 11, 25)
+
+    @BeforeEach
+    fun reset() {
+        EngineSupport.recreateSchema(administrationJdbc, schema)
+        store.createSchema()
+    }
+
+    @AfterAll
+    fun close() {
+        administrationJdbc.execute("DROP SCHEMA IF EXISTS $schema CASCADE")
+        blue.close()
+        green.close()
+        administration.close()
+    }
+
+    private fun submission(answer: String = "답", attemptId: UUID = UUID.randomUUID(), questionNumber: Int = 1) =
+        AnswerSubmission(attemptId, "cs/os/process", questionNumber, answer, "a".repeat(40), "b".repeat(64))
+
+    private fun visitor(hash: String, lastVisitOn: LocalDate = today) = store.createVisitor(hash, lastVisitOn, now)
+
+    private fun xminOfAttempt(attemptId: UUID) = jdbc.queryForObject("SELECT xmin::text FROM quiz_attempt WHERE attempt_id = ?", String::class.java, attemptId)
+    private fun xminOfGrade(attemptId: UUID) = jdbc.queryForObject("SELECT xmin::text FROM quiz_grade WHERE attempt_id = ?", String::class.java, attemptId)
+    private fun count(sql: String, vararg arguments: Any) = jdbc.queryForObject(sql, Int::class.java, *arguments)!!
+
+    /** 방문자 하나에 딸린 줄의 수 — 방문자 줄 · 시도 · 채점 */
+    private fun rowsOf(visitorId: Long) = Triple(
+        count("SELECT count(*) FROM study_visitor WHERE id = ?", visitorId),
+        count("SELECT count(*) FROM quiz_attempt WHERE visitor_id = ?", visitorId),
+        count("SELECT count(*) FROM quiz_grade g JOIN quiz_attempt a ON a.attempt_id = g.attempt_id WHERE a.visitor_id = ?", visitorId),
+    )
+
+    // ── 표 만들기 ─────────────────────────────────────────
+
+    @Test
+    fun `표 만들기를 다시 돌려도 있던 줄이 그대로 남는다`() {
+        val owner = visitor("h".repeat(64))
+        store.recordAttempt(owner.id, submission(), now)
+        store.createSchema()
+        greenStore.createSchema()
+        assertEquals(1, store.attemptsOf(owner.id).size)
+        assertEquals(owner, store.findVisitor("h".repeat(64)))
+    }
+
+    @Test
+    fun `두 자리가 동시에 표를 만들어도 둘 다 실패하지 않는다`() {
+        val executor = Executors.newFixedThreadPool(2)
+        try {
+            repeat(10) { round ->
+                EngineSupport.recreateSchema(administrationJdbc, schema)
+                val start = CountDownLatch(1)
+                val futures = listOf(store, greenStore).map { slot -> executor.submit(Callable { start.await(); slot.createSchema() }) }
+                start.countDown()
+                futures.forEach { future ->
+                    try { future.get(30, TimeUnit.SECONDS) } catch (error: Exception) { fail<Unit>("${round}번째 바퀴에서 표 만들기가 실패했다: ${error.cause ?: error}") }
+                }
+                assertNotNull(store.createVisitor("r$round".padEnd(64, 'x'), today, now))
+            }
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    // ── 방문자 ────────────────────────────────────────────
+
+    @Test
+    fun `방문자 줄에는 해시와 마지막 방문 날짜가 있고 계정 칸은 비어 있다`() {
+        val hash = "c".repeat(64)
+        val created = visitor(hash)
+        assertEquals(today, created.lastVisitOn)
+        val row = jdbc.queryForMap("SELECT token_hash, account_id, last_visit_on FROM study_visitor WHERE id = ?", created.id)
+        assertEquals(hash, row["token_hash"])
+        assertNull(row["account_id"])
+        assertEquals(java.sql.Date.valueOf(today), row["last_visit_on"])
+    }
+
+    @Test
+    fun `목록에 없는 해시는 없음이고 있는 해시는 그 방문자다`() {
+        val created = visitor("d".repeat(64))
+        assertNull(store.findVisitor("e".repeat(64)))
+        assertEquals(created, store.findVisitor("d".repeat(64)))
+    }
+
+    @Test
+    fun `마지막 방문을 갱신하면 다음 조회에 그 날짜가 나온다`() {
+        val created = visitor("d".repeat(64), lastVisitOn = today.minusDays(3))
+        store.touchVisit(created.id, today)
+        assertEquals(today, store.findVisitor("d".repeat(64))?.lastVisitOn)
+    }
+
+    // ── 시도 · 채점 ───────────────────────────────────────
+
+    @Test
+    fun `시도를 덧붙이면 낸 내용 그대로 저장된다`() {
+        val owner = visitor("h".repeat(64))
+        val submitted = submission(answer = "프로세스는 실행 중인 프로그램")
+        val stored = store.recordAttempt(owner.id, submitted, now)
+        val expected = xyz.junproject.backend.progress.usecase.StoredAttempt(submitted.attemptId, "cs/os/process", 1, "프로세스는 실행 중인 프로그램",
+            "a".repeat(40), "b".repeat(64), now, null, null)
+        assertEquals(expected, stored)
+        assertEquals(listOf(expected), store.attemptsOf(owner.id))
+    }
+
+    @Test
+    fun `같은 시도 번호의 재제출은 한 줄만 남고 처음 줄을 고치지 않은 채 돌려준다`() {
+        val owner = visitor("h".repeat(64))
+        val attemptId = UUID.randomUUID()
+        val first = store.recordAttempt(owner.id, submission(answer = "첫 답", attemptId = attemptId), now)
+        val xmin = xminOfAttempt(attemptId)
+        val second = store.recordAttempt(owner.id, submission(answer = "둘째 답", attemptId = attemptId), now.plusSeconds(5))
+        assertEquals(first, second)
+        assertEquals("첫 답", second?.answer)
+        assertEquals(1, count("SELECT count(*) FROM quiz_attempt WHERE attempt_id = ?", attemptId))
+        assertEquals(xmin, xminOfAttempt(attemptId), "처음 줄이 고쳐졌다")
+    }
+
+    @Test
+    fun `두 자리가 같은 시도 번호를 동시에 저장해도 한 줄만 남고 모두 같은 결과를 받는다`() {
+        val owner = visitor("h".repeat(64))
+        val executor = Executors.newFixedThreadPool(8)
+        try {
+            repeat(5) {
+                val attemptId = UUID.randomUUID()
+                val start = CountDownLatch(1)
+                val futures = (0 until 8).map { index ->
+                    val slot = if (index % 2 == 0) store else greenStore
+                    executor.submit(Callable { start.await(); slot.recordAttempt(owner.id, submission(answer = "답$index", attemptId = attemptId), now.plusMillis(index.toLong())) })
+                }
+                start.countDown()
+                val results = futures.map { it.get(30, TimeUnit.SECONDS) }
+                assertEquals(1, results.toSet().size, results.toString())
+                assertNotNull(results.first())
+                assertEquals(1, count("SELECT count(*) FROM quiz_attempt WHERE attempt_id = ?", attemptId))
+            }
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `다른 방문자가 쓴 시도 번호는 없음으로 돌아오고 주인의 줄은 그대로다`() {
+        val owner = visitor("a".repeat(64))
+        val other = visitor("b".repeat(64))
+        val attemptId = UUID.randomUUID()
+        store.recordAttempt(owner.id, submission(answer = "주인의 답", attemptId = attemptId), now)
+        val xmin = xminOfAttempt(attemptId)
+        assertNull(store.recordAttempt(other.id, submission(answer = "남의 답", attemptId = attemptId), now))
+        assertEquals(listOf("주인의 답"), store.attemptsOf(owner.id).map { it.answer })
+        assertEquals(emptyList<Any>(), store.attemptsOf(other.id))
+        assertEquals(xmin, xminOfAttempt(attemptId))
+    }
+
+    @Test
+    fun `채점은 시도 줄을 고치지 않고 따로 덧붙는다`() {
+        val owner = visitor("h".repeat(64))
+        val submitted = submission()
+        val stored = store.recordAttempt(owner.id, submitted, now)!!
+        val xmin = xminOfAttempt(submitted.attemptId)
+        val gradedAt = now.plusSeconds(30)
+        val graded = store.recordGrade(owner.id, submitted.attemptId, Grade.CORRECT, gradedAt)
+        assertEquals(stored.copy(grade = Grade.CORRECT, gradedAt = gradedAt), graded)
+        assertEquals(xmin, xminOfAttempt(submitted.attemptId), "채점이 시도 줄을 고쳤다")
+        assertEquals(1, count("SELECT count(*) FROM quiz_grade WHERE attempt_id = ?", submitted.attemptId))
+        assertEquals(listOf(graded), store.attemptsOf(owner.id))
+    }
+
+    @Test
+    fun `같은 시도를 다시 채점해도 첫 채점 줄이 고쳐지지 않고 그대로 돌아온다`() {
+        val owner = visitor("h".repeat(64))
+        val submitted = submission()
+        store.recordAttempt(owner.id, submitted, now)
+        val first = store.recordGrade(owner.id, submitted.attemptId, Grade.WRONG, now.plusSeconds(10))
+        val xmin = xminOfGrade(submitted.attemptId)
+        val again = store.recordGrade(owner.id, submitted.attemptId, Grade.CORRECT, now.plusSeconds(20))
+        assertEquals(first, again)
+        assertEquals(Grade.WRONG, again?.grade)
+        assertEquals(1, count("SELECT count(*) FROM quiz_grade WHERE attempt_id = ?", submitted.attemptId))
+        assertEquals(xmin, xminOfGrade(submitted.attemptId))
+    }
+
+    @Test
+    fun `남의 시도나 없는 시도는 채점할 수 없다`() {
+        val owner = visitor("a".repeat(64))
+        val other = visitor("b".repeat(64))
+        val submitted = submission()
+        store.recordAttempt(owner.id, submitted, now)
+        assertNull(store.recordGrade(other.id, submitted.attemptId, Grade.CORRECT, now))
+        assertNull(store.recordGrade(owner.id, UUID.randomUUID(), Grade.CORRECT, now))
+        assertEquals(0, count("SELECT count(*) FROM quiz_grade"))
+    }
+
+    @Test
+    fun `시도 목록은 그 방문자의 것만 낸 시각 차례로 채점과 함께 나온다`() {
+        val owner = visitor("a".repeat(64))
+        val other = visitor("b".repeat(64))
+        val later = submission(questionNumber = 2)
+        val earlier = submission(questionNumber = 1)
+        store.recordAttempt(owner.id, later, now.plusSeconds(60))
+        store.recordAttempt(owner.id, earlier, now)
+        store.recordAttempt(other.id, submission(questionNumber = 9), now.minusSeconds(60))
+        store.recordGrade(owner.id, later.attemptId, Grade.PARTIAL, now.plusSeconds(90))
+        val attempts = store.attemptsOf(owner.id)
+        assertEquals(listOf(earlier.attemptId, later.attemptId), attempts.map { it.attemptId })
+        assertEquals(listOf(null, Grade.PARTIAL), attempts.map { it.grade })
+        assertEquals(listOf(null, now.plusSeconds(90)), attempts.map { it.gradedAt })
+    }
+
+    @Test
+    fun `구간 세기는 시작은 넣고 끝은 뺀다`() {
+        val owner = visitor("a".repeat(64))
+        val other = visitor("b".repeat(64))
+        val from = Instant.parse("2026-11-24T15:00:00Z")
+        val until = Instant.parse("2026-11-25T15:00:00Z")
+        listOf(from.minusMillis(1), from, until.minusMillis(1), until).forEach { store.recordAttempt(owner.id, submission(), it) }
+        store.recordAttempt(other.id, submission(), from)
+        assertEquals(2, store.countAttemptsBetween(owner.id, from, until))
+        assertEquals(4, store.countAttempts(owner.id))
+    }
+
+    // ── 지우기 · 보관 ─────────────────────────────────────
+
+    @Test
+    fun `방문자를 지우면 그 시도 채점 방문자 줄만 지우고 지운 시도의 수를 돌려준다`() {
+        val mine = visitor("a".repeat(64))
+        val other = visitor("b".repeat(64))
+        repeat(3) { store.recordAttempt(mine.id, submission(), now).also { attempt -> store.recordGrade(mine.id, attempt!!.attemptId, Grade.CORRECT, now) } }
+        repeat(2) { store.recordAttempt(other.id, submission(), now).also { attempt -> store.recordGrade(other.id, attempt!!.attemptId, Grade.WRONG, now) } }
+        val otherBefore = rowsOf(other.id)
+        assertEquals(Triple(1, 2, 2), otherBefore)
+
+        assertEquals(3, store.countAttempts(mine.id))
+        assertEquals(3, store.deleteVisitor(mine.id))
+
+        assertEquals(Triple(0, 0, 0), rowsOf(mine.id))
+        assertEquals(otherBefore, rowsOf(other.id))
+        assertNull(store.findVisitor("a".repeat(64)))
+        assertEquals(2, store.attemptsOf(other.id).size)
+    }
+
+    @Test
+    fun `보관 삭제는 기준 날짜보다 앞선 마지막 방문만 지우고 기준 당일은 남긴다`() {
+        val cutoff = LocalDate.of(2025, 11, 25)
+        val expired = visitor("a".repeat(64), lastVisitOn = cutoff.minusDays(1))
+        val onCutoff = visitor("b".repeat(64), lastVisitOn = cutoff)
+        val recent = visitor("c".repeat(64), lastVisitOn = cutoff.plusDays(1))
+        listOf(expired, onCutoff, recent).forEach { owner ->
+            store.recordAttempt(owner.id, submission(), now).also { store.recordGrade(owner.id, it!!.attemptId, Grade.CORRECT, now) }
+        }
+        val keptBefore = listOf(onCutoff, recent).map { rowsOf(it.id) }
+
+        assertEquals(1, store.deleteVisitorsLastVisitedBefore(cutoff))
+
+        assertEquals(Triple(0, 0, 0), rowsOf(expired.id))
+        assertEquals(keptBefore, listOf(onCutoff, recent).map { rowsOf(it.id) })
+    }
+
+    @Test
+    fun `두 자리가 함께 보관 삭제를 돌려도 결과가 같고 실패하지 않는다`() {
+        val cutoff = LocalDate.of(2025, 11, 25)
+        val expired = (0 until 20).map { visitor("x$it".padEnd(64, 'x'), lastVisitOn = cutoff.minusDays(it + 1L)) }
+        expired.forEach { owner -> repeat(2) { store.recordAttempt(owner.id, submission(), now) } }
+        val kept = visitor("k".repeat(64), lastVisitOn = cutoff)
+        store.recordAttempt(kept.id, submission(), now)
+
+        val executor = Executors.newFixedThreadPool(2)
+        try {
+            val start = CountDownLatch(1)
+            val futures = listOf(store, greenStore).map { slot -> executor.submit(Callable { start.await(); slot.deleteVisitorsLastVisitedBefore(cutoff) }) }
+            start.countDown()
+            val deleted = futures.map { it.get(30, TimeUnit.SECONDS) }
+            assertEquals(20, deleted.sum(), deleted.toString())
+        } finally {
+            executor.shutdownNow()
+        }
+        assertEquals(1, count("SELECT count(*) FROM study_visitor"))
+        assertEquals(Triple(1, 1, 0), rowsOf(kept.id))
+        assertEquals(1, count("SELECT count(*) FROM quiz_attempt"))
+    }
+}
