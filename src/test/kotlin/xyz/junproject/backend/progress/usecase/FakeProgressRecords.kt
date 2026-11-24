@@ -87,11 +87,30 @@ class FakeProgressRecords : ProgressRecords {
         return owned.size
     }
 
-    override fun deleteVisitorsLastVisitedBefore(cutoff: LocalDate): Int {
+    override fun recordFirstAttempt(tokenHash: String, today: LocalDate, submission: AnswerSubmission, submittedAt: Instant): StoredAttempt? {
+        call("recordFirstAttempt")
+        if (attemptOwners.containsKey(submission.attemptId)) return null      // 한 묶음 — 방문자도 남기지 않는다
+        val visitor = Visitor(nextVisitorId++, today).also { visitorsByHash[tokenHash] = it }
+        return put(visitor.id, submission, submittedAt)
+    }
+
+    /** 보관 삭제의 묶음마다 받은 한도 */
+    val purgeLimits = mutableListOf<Int>()
+
+    override fun deleteVisitorsLastVisitedBefore(cutoff: LocalDate, limit: Int): Int {
         call("deleteVisitorsLastVisitedBefore")
         purgeCutoffs += cutoff
-        val expired = visitorsByHash.values.filter { it.lastVisitOn.isBefore(cutoff) }
-        expired.forEach { deleteVisitor(it.id) }
+        purgeLimits += limit
+        val expired = visitorsByHash.values.filter { it.lastVisitOn.isBefore(cutoff) }.take(limit)
+        expired.forEach { visitor ->
+            ownedBy(visitor.id).forEach { attempts.remove(it.attemptId); attemptOwners.remove(it.attemptId) }
+            visitorsByHash.entries.removeIf { it.value.id == visitor.id }
+        }
         return expired.size
+    }
+
+    override fun countVisitorsLastVisitedBefore(cutoff: LocalDate): Int {
+        call("countVisitorsLastVisitedBefore")
+        return visitorsByHash.values.count { it.lastVisitOn.isBefore(cutoff) }
     }
 }

@@ -285,7 +285,7 @@ class ProgressStoreEngineTest {
         }
         val keptBefore = listOf(onCutoff, recent).map { rowsOf(it.id) }
 
-        assertEquals(1, store.deleteVisitorsLastVisitedBefore(cutoff))
+        assertEquals(1, store.deleteVisitorsLastVisitedBefore(cutoff, 500))
 
         assertEquals(Triple(0, 0, 0), rowsOf(expired.id))
         assertEquals(keptBefore, listOf(onCutoff, recent).map { rowsOf(it.id) })
@@ -302,7 +302,7 @@ class ProgressStoreEngineTest {
         val executor = Executors.newFixedThreadPool(2)
         try {
             val start = CountDownLatch(1)
-            val futures = listOf(store, greenStore).map { slot -> executor.submit(Callable { start.await(); slot.deleteVisitorsLastVisitedBefore(cutoff) }) }
+            val futures = listOf(store, greenStore).map { slot -> executor.submit(Callable { start.await(); slot.deleteVisitorsLastVisitedBefore(cutoff, 500) }) }
             start.countDown()
             val deleted = futures.map { it.get(30, TimeUnit.SECONDS) }
             assertEquals(20, deleted.sum(), deleted.toString())
@@ -312,5 +312,56 @@ class ProgressStoreEngineTest {
         assertEquals(1, count("SELECT count(*) FROM study_visitor"))
         assertEquals(Triple(1, 1, 0), rowsOf(kept.id))
         assertEquals(1, count("SELECT count(*) FROM quiz_attempt"))
+    }
+
+    // ── 리뷰 루프 1 반영(명세 15) ─────────────────────────
+
+    @Test
+    fun `첫 시도는 방문자 줄과 함께 한 묶음으로 들어간다`() {
+        val submitted = submission(answer = "첫 답")
+        val stored = store.recordFirstAttempt("f".repeat(64), today, submitted, now)
+        assertEquals("첫 답", stored?.answer)
+        val created = requireNotNull(store.findVisitor("f".repeat(64)))
+        assertEquals(today, created.lastVisitOn)
+        assertEquals(listOf(stored), store.attemptsOf(created.id))
+    }
+
+    @Test
+    fun `첫 시도의 번호가 남의 것이면 방문자 줄을 남기지 않고 없음으로 돌아온다`() {
+        val owner = visitor("a".repeat(64))
+        val attemptId = UUID.randomUUID()
+        store.recordAttempt(owner.id, submission(answer = "주인의 답", attemptId = attemptId), now)
+        assertNull(store.recordFirstAttempt("f".repeat(64), today, submission(answer = "남의 답", attemptId = attemptId), now))
+        assertNull(store.findVisitor("f".repeat(64)))
+        assertEquals(1, count("SELECT count(*) FROM study_visitor"))
+        assertEquals(listOf("주인의 답"), store.attemptsOf(owner.id).map { it.answer })
+    }
+
+    @Test
+    fun `첫 시도 넣기가 DB 오류면 방문자 줄도 남지 않고 저장소 오류로 던진다`() {
+        jdbc.execute("CREATE FUNCTION reject_attempt() RETURNS trigger LANGUAGE plpgsql AS \$\$ BEGIN RAISE EXCEPTION 'rejected by test'; END \$\$")
+        jdbc.execute("CREATE TRIGGER reject_attempt BEFORE INSERT ON quiz_attempt FOR EACH ROW EXECUTE FUNCTION reject_attempt()")
+        assertThrows(org.springframework.dao.DataAccessException::class.java) {
+            store.recordFirstAttempt("f".repeat(64), today, submission(), now)
+        }
+        assertEquals(0, count("SELECT count(*) FROM study_visitor"))
+    }
+
+    @Test
+    fun `보관 삭제의 한 묶음은 한도만큼만 지우고 남은 수를 셀 수 있다`() {
+        val cutoff = LocalDate.of(2025, 11, 25)
+        val expired = (0 until 8).map { visitor("x$it".padEnd(64, 'x'), lastVisitOn = cutoff.minusDays(it + 1L)) }
+        expired.forEach { store.recordAttempt(it.id, submission(), now) }
+        val onCutoff = visitor("c".repeat(64), lastVisitOn = cutoff)
+
+        assertEquals(8, store.countVisitorsLastVisitedBefore(cutoff))
+        assertEquals(3, store.deleteVisitorsLastVisitedBefore(cutoff, 3))
+        assertEquals(5, store.countVisitorsLastVisitedBefore(cutoff))
+        assertEquals(3, store.deleteVisitorsLastVisitedBefore(cutoff, 3))
+        assertEquals(2, store.deleteVisitorsLastVisitedBefore(cutoff, 3))
+        assertEquals(0, store.deleteVisitorsLastVisitedBefore(cutoff, 3))
+        assertEquals(0, store.countVisitorsLastVisitedBefore(cutoff))
+        assertEquals(listOf(onCutoff.id), jdbc.queryForList("SELECT id FROM study_visitor", Long::class.java))
+        assertEquals(0, count("SELECT count(*) FROM quiz_attempt"))
     }
 }

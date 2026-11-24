@@ -53,6 +53,13 @@ interface ProgressRecords {
     fun countAttempts(visitorId: Long): Int
     /** 방문자 줄과 그 시도 · 채점을 지운다 — 지운 시도의 수 */
     fun deleteVisitor(visitorId: Long): Int
-    /** 마지막 방문이 cutoff 보다 앞선(cutoff 당일은 남는다) 방문자와 그 기록을 지운다 — 지운 방문자의 수 */
-    fun deleteVisitorsLastVisitedBefore(cutoff: LocalDate): Int
+    /**
+     * 첫 답(쿠키 없음 · 모르는 토큰) — 방문자 줄과 시도를 한 트랜잭션으로 넣는다(명세 15). 시도 번호가 이미 다른 방문자의 것이면
+     * 아무것도 남기지 않고 null. DB 오류면 아무것도 남기지 않고 DataAccessException.
+     */
+    fun recordFirstAttempt(tokenHash: String, today: LocalDate, submission: AnswerSubmission, submittedAt: Instant): StoredAttempt?
+    /** 마지막 방문이 cutoff 보다 앞선(cutoff 당일은 남는다) 방문자를 [limit] 명까지 그 기록과 함께 지운다 — 지운 방문자의 수(명세 15: 묶음) */
+    fun deleteVisitorsLastVisitedBefore(cutoff: LocalDate, limit: Int): Int
+    /** 마지막 방문이 cutoff 보다 앞선 방문자의 수 — 보관 삭제가 총량 상한에서 멈췄을 때 남은 수 */
+    fun countVisitorsLastVisitedBefore(cutoff: LocalDate): Int
 }

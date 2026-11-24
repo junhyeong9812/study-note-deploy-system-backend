@@ -18,8 +18,10 @@ sealed interface VisitorLookup {
 }
 
 sealed interface SubmitOutcome {
-    /** issuedToken: 이번에 새로 발급한 토큰(쿠키로 내보낼 원문) — 아는 방문자면 null */
-    data class Saved(val attempt: StoredAttempt, val issuedToken: String?) : SubmitOutcome
+    /** cookieToken: 쿠키로 내보낼 토큰 원문 — 새 방문자면 새로 만든 것, 아는 방문자면 제시된 것(명세 15). newVisitor: 이번에 새로 만들었나 */
+    data class Saved(val attempt: StoredAttempt, val cookieToken: String, val newVisitor: Boolean) : SubmitOutcome
+    /** 저장할 수 없는 글자(NUL) — 저장소에 닿기 전에 거절한다(명세 15) */
+    data object InvalidInput : SubmitOutcome
     data object AnswerTooLong : SubmitOutcome
     data object DailyLimitReached : SubmitOutcome
     /** 같은 시도 번호를 다른 방문자가 이미 씀 */
@@ -44,8 +46,15 @@ sealed interface DeleteOutcome {
     data object StorageUnavailable : DeleteOutcome
 }
 
+/** 방문자의 시도 목록 — 모르는 방문자는 빈 목록 */
+sealed interface AttemptsOutcome {
+    data class Listed(val attempts: List<StoredAttempt>) : AttemptsOutcome
+    data object StorageUnavailable : AttemptsOutcome
+}
+
 sealed interface PurgeOutcome {
-    data class Purged(val visitors: Int) : PurgeOutcome
+    /** remaining: 한 실행의 총량 상한에서 멈춰 아직 남은 수(다 지웠으면 0) */
+    data class Purged(val visitors: Int, val remaining: Int) : PurgeOutcome
     data object Failed : PurgeOutcome
 }
 
@@ -54,12 +63,19 @@ class StudyProgressService(
     private val records: ProgressRecords,
     private val clock: Clock,
     private val requestLog: RequestLog,
+    /** 보관 삭제의 한 묶음(명세 15 — 기본 500) */
+    private val purgeBatchSize: Int = PURGE_BATCH_SIZE,
+    /** 보관 삭제 한 실행의 총량 상한(명세 15) */
+    private val purgeMaxPerRun: Int = PURGE_MAX_PER_RUN,
     private val issueToken: () -> String = { VisitorToken.issue() },
 ) {
     companion object {
         const val ANSWER_MAX_CHARS = 4_000
         const val DAILY_ATTEMPT_LIMIT = 1_000
         val RETENTION: Period = Period.ofYears(1)
+        const val PURGE_BATCH_SIZE = 500
+        /** 메인이 정할 값 — 뼈대의 임시값 */
+        const val PURGE_MAX_PER_RUN = 50_000
     }
 
     private fun today() = ReviewSchedule.dateOf(clock.instant())
@@ -121,7 +137,7 @@ class StudyProgressService(
                 val dayEnd = today.plusDays(1).atStartOfDay(ReviewSchedule.ZONE).toInstant()
                 if (records.countAttemptsBetween(visitor.id, dayStart, dayEnd) >= DAILY_ATTEMPT_LIMIT) {
                     // 상한에 닿은 뒤에도 이미 저장한 시도의 재전송(두 번 눌림)은 처음 결과를 돌려준다
-                    records.findAttempt(visitor.id, submission.attemptId)?.let { return SubmitOutcome.Saved(it, null) }
+                    records.findAttempt(visitor.id, submission.attemptId)?.let { return SubmitOutcome.Saved(it, presentedToken!!, false) }
                     requestLog.log(requestId, "progress answer rejected(daily limit) $subject length=$length", "warning")
                     return SubmitOutcome.DailyLimitReached
                 }
@@ -132,12 +148,15 @@ class StudyProgressService(
                 return SubmitOutcome.AttemptIdTaken
             }
             requestLog.log(requestId, "progress answer saved $subject length=$length newVisitor=${issuedToken != null}")
-            return SubmitOutcome.Saved(stored, issuedToken)
+            return SubmitOutcome.Saved(stored, issuedToken ?: presentedToken!!, issuedToken != null)
         } catch (error: DataAccessException) {
             logStorageFailure(requestId, "submit answer($subject)", error)
             return SubmitOutcome.StorageUnavailable
         }
     }
+
+    /** 방문자의 시도 목록(낸 시각 차례) — 쿠키 없음 · 모르는 토큰은 빈 목록이고 방문자를 만들지 않는다. DB 오류는 결과로(명세 15) */
+    fun attempts(requestId: String, presentedToken: String?): AttemptsOutcome = TODO("task 02 리뷰 루프 1")
 
     /** 스스로 고른 결과를 그 시도에 덧붙인다 — 모르는 방문자는 만들지 않는다 */
     fun grade(requestId: String, presentedToken: String?, attemptId: UUID, grade: Grade): GradeOutcome {
@@ -193,9 +212,9 @@ class StudyProgressService(
     fun purgeInactiveVisitors(requestId: String): PurgeOutcome {
         val cutoff = today().minus(RETENTION)
         return try {
-            val purged = records.deleteVisitorsLastVisitedBefore(cutoff)
+            val purged = records.deleteVisitorsLastVisitedBefore(cutoff, purgeBatchSize)
             requestLog.log(requestId, "progress retention purged visitors=$purged lastVisitBefore=$cutoff")
-            PurgeOutcome.Purged(purged)
+            PurgeOutcome.Purged(purged, 0)
         } catch (error: Exception) {
             requestLog.log(requestId, "progress retention failed: ${error.javaClass.simpleName} lastVisitBefore=$cutoff", "error")
             PurgeOutcome.Failed

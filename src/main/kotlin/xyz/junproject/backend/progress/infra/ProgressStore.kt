@@ -19,7 +19,13 @@ import java.util.UUID
  * 표는 처음 닿을 때 만든다(만들기에 성공하기 전까지는 호출마다 다시 시도한다) — 뜬 직후의 미리 만들기는 설정이 부른다.
  * 시도 · 채점은 덧붙이기만 한다: 같은 번호는 `ON CONFLICT DO NOTHING` 뒤 다시 읽는다(고치지 않는다).
  */
-class ProgressStore(private val jdbc: JdbcTemplate) : ProgressRecords {
+class ProgressStore(
+    private val jdbc: JdbcTemplate,
+    /** DB 에 닿지 못한 뒤의 쉼을 재는 시계(명세 15) */
+    private val clock: java.time.Clock = java.time.Clock.systemUTC(),
+    /** DB 에 닿지 못한 직후 이 동안은 풀을 기다리지 않고 곧바로 DataAccessException 으로 실패한다(명세 15 — 짧은 쉼) */
+    private val unavailablePause: java.time.Duration = java.time.Duration.ofSeconds(5),
+) : ProgressRecords {
     private companion object {
         /** 표 만들기를 줄 세우는 잠금 번호 — 두 자리가 동시에 `CREATE ... IF NOT EXISTS` 를 돌리면 카탈로그 키 충돌로 한쪽이 깨진다(실측) */
         const val SCHEMA_LOCK = 7_310_250_001L
@@ -179,7 +185,12 @@ class ProgressStore(private val jdbc: JdbcTemplate) : ProgressRecords {
             Int::class.java, visitorId)!!
 
     /** 두 자리가 함께 돌려도 잠금으로 한 줄로 선다 — 뒤에 선 쪽은 남은 것만(대개 0) 지우므로 결과가 같다 */
-    override fun deleteVisitorsLastVisitedBefore(cutoff: LocalDate): Int =
+    override fun recordFirstAttempt(tokenHash: String, today: LocalDate, submission: AnswerSubmission, submittedAt: Instant): StoredAttempt? =
+        TODO("task 02 리뷰 루프 1")
+
+    override fun countVisitorsLastVisitedBefore(cutoff: LocalDate): Int = TODO("task 02 리뷰 루프 1")
+
+    override fun deleteVisitorsLastVisitedBefore(cutoff: LocalDate, limit: Int): Int =
         underLock(ready(), PURGE_LOCK) { connection ->
             connection.prepareStatement("DELETE FROM study_visitor WHERE last_visit_on < ?").use { statement ->
                 statement.setObject(1, cutoff)

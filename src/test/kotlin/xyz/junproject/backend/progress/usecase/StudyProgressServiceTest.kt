@@ -35,8 +35,9 @@ class StudyProgressServiceTest {
     private val issuedTokens = ArrayDeque(listOf(firstToken, secondToken))
     private var tokenIssueCount = 0
 
-    private fun service(at: Instant = now, store: ProgressRecords = records) =
-        StudyProgressService(store, Clock.fixed(at, ZoneOffset.UTC), logs.requestLog) {
+    private fun service(at: Instant = now, store: ProgressRecords = records,
+                        purgeBatchSize: Int = StudyProgressService.PURGE_BATCH_SIZE, purgeMaxPerRun: Int = StudyProgressService.PURGE_MAX_PER_RUN) =
+        StudyProgressService(store, Clock.fixed(at, ZoneOffset.UTC), logs.requestLog, purgeBatchSize = purgeBatchSize, purgeMaxPerRun = purgeMaxPerRun) {
             tokenIssueCount++
             issuedTokens.removeFirst()
         }
@@ -111,7 +112,8 @@ class StudyProgressServiceTest {
         assertEquals(VisitorLookup.Found(visitor), service().identify("req-1", token))
         val outcome = service().submitAnswer("req-2", token, submission())
         assertTrue(outcome is SubmitOutcome.Saved, outcome.toString())
-        assertNull((outcome as SubmitOutcome.Saved).issuedToken)
+        assertEquals(token, (outcome as SubmitOutcome.Saved).cookieToken)
+        assertFalse(outcome.newVisitor)
     }
 
     // ── 답을 냄 ────────────────────────────────────────────
@@ -122,7 +124,8 @@ class StudyProgressServiceTest {
         val outcome = service().submitAnswer("req-1", null, submitted)
         assertTrue(outcome is SubmitOutcome.Saved, outcome.toString())
         outcome as SubmitOutcome.Saved
-        assertEquals(firstToken, outcome.issuedToken)
+        assertEquals(firstToken, outcome.cookieToken)
+        assertTrue(outcome.newVisitor)
         assertEquals(setOf(VisitorToken.hash(firstToken)), records.visitorsByHash.keys)
         assertEquals(StoredAttempt(submitted.attemptId, "cs/os/process", 3, submitted.answer, "a".repeat(40), "b".repeat(64), now, null, null),
             outcome.attempt)
@@ -134,7 +137,8 @@ class StudyProgressServiceTest {
     fun `목록에 없는 토큰으로 답을 내면 그 값을 받지 않고 새 토큰을 발급한다`() {
         val forged = "U".repeat(43)
         val outcome = service().submitAnswer("req-1", forged, submission()) as SubmitOutcome.Saved
-        assertEquals(firstToken, outcome.issuedToken)
+        assertEquals(firstToken, outcome.cookieToken)
+        assertTrue(outcome.newVisitor)
         assertFalse(records.visitorsByHash.containsKey(VisitorToken.hash(forged)))
         assertEquals(setOf(VisitorToken.hash(firstToken)), records.visitorsByHash.keys)
     }
@@ -144,7 +148,8 @@ class StudyProgressServiceTest {
         val (token, visitor) = knownVisitor()
         val submitted = submission()
         val outcome = service().submitAnswer("req-1", token, submitted) as SubmitOutcome.Saved
-        assertNull(outcome.issuedToken)
+        assertEquals(token, outcome.cookieToken)
+        assertFalse(outcome.newVisitor)
         assertEquals(0, tokenIssueCount)
         assertEquals(visitor.id, records.attemptOwners[submitted.attemptId])
     }
@@ -155,15 +160,16 @@ class StudyProgressServiceTest {
         records.failing += "findVisitor"
         assertEquals(SubmitOutcome.StorageUnavailable, service().submitAnswer("req-1", token, submission()))
         assertEquals(0, tokenIssueCount)
-        assertFalse("createVisitor" in records.calls)
+        assertTrue(records.calls.none { it == "createVisitor" || it == "recordFirstAttempt" }, records.calls.toString())
         assertTrue(records.attempts.isEmpty())
     }
 
     @Test
     fun `첫 답에서 방문자를 만들지 못하면 저장 실패로 알린다`() {
-        records.failing += "createVisitor"
+        records.failing += setOf("createVisitor", "recordFirstAttempt")
         assertEquals(SubmitOutcome.StorageUnavailable, service().submitAnswer("req-1", null, submission()))
         assertTrue(records.attempts.isEmpty())
+        assertTrue(records.visitorsByHash.isEmpty())
     }
 
     @Test
@@ -344,8 +350,8 @@ class StudyProgressServiceTest {
         knownVisitor(token = "B".repeat(43), lastVisitOn = LocalDate.of(2025, 11, 25))   // 기준 당일 — 남음
         // 한국 2026-11-25 00:30(UTC 로는 11-24) → 기준 2025-11-25
         val outcome = service(at = Instant.parse("2026-11-24T15:30:00Z")).purgeInactiveVisitors("req-1")
-        assertEquals(listOf(LocalDate.of(2025, 11, 25)), records.purgeCutoffs)
-        assertEquals(PurgeOutcome.Purged(1), outcome)
+        assertEquals(setOf(LocalDate.of(2025, 11, 25)), records.purgeCutoffs.toSet())
+        assertEquals(PurgeOutcome.Purged(1, 0), outcome)
     }
 
     @Test
@@ -378,6 +384,89 @@ class StudyProgressServiceTest {
         listOf(answer, firstToken, secondToken, forged, knownToken).forEach { secret ->
             assertTrue(lines.none { it.contains(secret) }, "로그에 나오면 안 되는 값: $secret\n$lines")
         }
+    }
+
+    // ── 리뷰 루프 1 반영(명세 15) ─────────────────────────
+
+    @Test
+    fun `쿠키 없는 첫 답의 시도 번호가 남의 것이면 방문자 줄이 늘지 않는다`() {
+        val (ownerToken, _) = knownVisitor(token = "A".repeat(43))
+        val attemptId = UUID.randomUUID()
+        service().submitAnswer("req-1", ownerToken, submission(answer = "주인의 답", attemptId = attemptId))
+        val visitorsBefore = records.visitorsByHash.keys.toSet()
+        assertEquals(SubmitOutcome.AttemptIdTaken, service().submitAnswer("req-2", null, submission(answer = "남의 답", attemptId = attemptId)))
+        assertEquals(visitorsBefore, records.visitorsByHash.keys)
+        assertEquals("주인의 답", records.attempts.getValue(attemptId).answer)
+    }
+
+    @Test
+    fun `답에 NUL 이 있으면 저장소에 닿지 않고 잘못된 입력으로 거절한다`() {
+        val (token, _) = knownVisitor()
+        assertEquals(SubmitOutcome.InvalidInput, service().submitAnswer("req-1", null, submission(answer = "앞\u0000뒤")))
+        assertEquals(SubmitOutcome.InvalidInput, service().submitAnswer("req-2", token, submission(answer = "앞\u0000뒤")))
+        assertEquals(emptyList<String>(), records.calls)
+        assertEquals(0, tokenIssueCount)
+        assertEquals(1, records.visitorsByHash.size)                       // knownVisitor 하나뿐 — 새 방문자 없음
+        assertTrue(logs.lines.none { it.startsWith("ERROR") }, logs.lines.toString())
+    }
+
+    @Test
+    fun `주제 경로에 NUL 이 있으면 저장소에 닿지 않고 잘못된 입력으로 거절한다`() {
+        val withNul = submission().copy(topicPath = "cs/os/\u0000process")
+        assertEquals(SubmitOutcome.InvalidInput, service().submitAnswer("req-1", null, withNul))
+        assertEquals(emptyList<String>(), records.calls)
+        assertEquals(0, tokenIssueCount)
+        assertTrue(records.visitorsByHash.isEmpty())
+        assertTrue(logs.lines.none { it.startsWith("ERROR") }, logs.lines.toString())
+    }
+
+    @Test
+    fun `보관 삭제는 묶음 크기보다 많아도 묶음으로 되풀이해 전부 지운다`() {
+        repeat(8) { knownVisitor(token = "E$it".padEnd(43, 'e'), lastVisitOn = LocalDate.of(2025, 1, 1)) }
+        knownVisitor(token = "K".repeat(43), lastVisitOn = today)
+        val outcome = service(purgeBatchSize = 3, purgeMaxPerRun = 100).purgeInactiveVisitors("req-1")
+        assertEquals(PurgeOutcome.Purged(8, 0), outcome)
+        assertTrue(records.purgeLimits.size >= 3, records.purgeLimits.toString())
+        assertTrue(records.purgeLimits.all { it in 1..3 }, "한 묶음이 묶음 크기를 넘었다: ${records.purgeLimits}")
+        assertEquals(setOf(VisitorToken.hash("K".repeat(43))), records.visitorsByHash.keys)
+    }
+
+    @Test
+    fun `보관 삭제는 한 실행의 총량 상한에 닿으면 멈추고 남은 수를 결과와 로그에 남긴다`() {
+        repeat(8) { knownVisitor(token = "E$it".padEnd(43, 'e'), lastVisitOn = LocalDate.of(2025, 1, 1)) }
+        val outcome = service(purgeBatchSize = 3, purgeMaxPerRun = 7).purgeInactiveVisitors("req-1")
+        assertEquals(PurgeOutcome.Purged(7, 1), outcome)
+        assertEquals(7, records.purgeLimits.sum(), "총량 상한을 넘겨 지우려 했다: ${records.purgeLimits}")
+        assertEquals(1, records.visitorsByHash.size)
+        assertTrue(logs.lines.any { it.contains("remaining=1") }, logs.lines.toString())
+    }
+
+    @Test
+    fun `시도 목록은 그 방문자의 것만 낸 시각 차례로 돌려준다`() {
+        val (mineToken, mine) = knownVisitor(token = "A".repeat(43))
+        val (_, other) = knownVisitor(token = "B".repeat(43))
+        val later = records.put(mine.id, submission(answer = "나중"), now.plusSeconds(60))
+        val earlier = records.put(mine.id, submission(answer = "먼저"), now)
+        records.put(other.id, submission(answer = "남의 것"), now.minusSeconds(60))
+        assertEquals(AttemptsOutcome.Listed(listOf(earlier, later)), service().attempts("req-1", mineToken))
+    }
+
+    @Test
+    fun `쿠키가 없거나 모르는 토큰이면 시도 목록은 비어 있고 방문자를 만들지 않는다`() {
+        assertEquals(AttemptsOutcome.Listed(emptyList()), service().attempts("req-1", null))
+        assertEquals(AttemptsOutcome.Listed(emptyList()), service().attempts("req-2", "U".repeat(43)))
+        assertTrue(records.visitorsByHash.isEmpty())
+        assertEquals(0, tokenIssueCount)
+        assertTrue(records.calls.none { it == "createVisitor" || it == "recordFirstAttempt" }, records.calls.toString())
+    }
+
+    @Test
+    fun `시도 목록을 읽다 DB 오류가 나면 예외가 아니라 저장소 사용 불가로 돌아온다`() {
+        val (token, _) = knownVisitor()
+        records.failing += "attemptsOf"
+        assertEquals(AttemptsOutcome.StorageUnavailable, service().attempts("req-1", token))
+        records.failing.clear(); records.failing += "findVisitor"
+        assertEquals(AttemptsOutcome.StorageUnavailable, service().attempts("req-2", token))
     }
 
     /** 연결을 줄 수 없는 DB */

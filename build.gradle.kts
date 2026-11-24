@@ -44,6 +44,8 @@ kotlin {
 // withType 이 아니라 test 하나에만 건다 — withType 이면 engineTest 에도 excludeTags 가 붙어 아무것도 돌지 않는다.
 tasks.named<Test>("test") {
 	useJUnitPlatform { excludeTags("engine") }
+	// 가상 스레드의 실행 자리를 2 로 — DB 를 기다리는 호출이 실행 자리를 붙잡아 무관한 요청을 미는지 적은 스레드로 재현한다(ProgressStoreUnavailableTest)
+	jvmArgs("-Djdk.virtualThreadScheduler.parallelism=2")
 }
 
 // 실제 PostgreSQL 이 있어야 도는 테스트 — scripts/engine-test.sh 가 컨테이너를 띄우고 부른다
