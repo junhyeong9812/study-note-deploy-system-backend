@@ -20,7 +20,7 @@ import java.util.UUID
 /**
  * 명세 11.1 · 2.2 — DB 가 죽어 있어도 앱은 뜨고(연결 풀이 기동을 막지 않는다), 기본 헬스(`/actuator/health`)는 DB 에 매이지 않으며
  * (자리 전환이 막히지 않게), 의존 서비스 헬스에는 postgres 가 DOWN 으로 나오고, 저장은 예외가 아니라 저장 실패로 돌아온다.
- * DB 주소는 아무도 듣지 않는 포트. Redis 헬스는 끈다 — 이 테스트 환경에 Redis 가 없어 기본 헬스가 그 때문에 DOWN 이 되지 않게.
+ * 퀴즈 경로(명세 18)가 실제 앱에 조립되어 있다. DB 주소는 아무도 듣지 않는 포트. Redis 헬스는 끈다 — 이 테스트 환경에 Redis 가 없어 기본 헬스가 그 때문에 DOWN 이 되지 않게.
  */
 @SpringBootTest(
     webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
@@ -59,6 +59,19 @@ class ApplicationWithoutDatabaseTest {
         val components = json.readValue(response.body(), Map::class.java)["components"] as Map<String, Map<String, Any?>>
         assertEquals("DOWN", components["postgres"]?.get("status"), response.body())
         assertTrue(components.keys.containsAll(listOf("elasticsearch", "embedding", "redis")), response.body())   // 기존 대상은 그대로
+    }
+
+    @Test
+    fun `퀴즈 경로가 앱에 붙어 있다 - 쿠키 없는 복습 목록은 DB 없이 빈 목록이고 잘못된 주제 경로는 422 다`() {
+        val review = get("/api/quiz/review")
+        assertEquals(200, review.statusCode(), review.body())
+        val body = json.readValue(review.body(), Map::class.java)
+        assertEquals(true, body["success"], review.body())
+        assertEquals(emptyList<Any>(), (body["data"] as Map<*, *>)["items"], review.body())
+        assertTrue(review.headers().allValues("Set-Cookie").isEmpty(), review.headers().toString())
+
+        val rejected = get("/api/quiz/questions?topic=cs/..%2F..%2Fetc")
+        assertEquals(422, rejected.statusCode(), rejected.body())
     }
 
     @Test

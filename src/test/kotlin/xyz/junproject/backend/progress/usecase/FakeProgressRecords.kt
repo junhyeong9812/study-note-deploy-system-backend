@@ -75,6 +75,36 @@ class FakeProgressRecords : ProgressRecords {
         return ownedBy(visitorId).sortedBy { it.submittedAt }.map(::summaryOf)
     }
 
+    /** 주제 단위 읽기의 인자(방문자 · 주제) — 읽는 시도가 그 주제의 것만인지 본다(명세 18.2) */
+    val topicReads = mutableListOf<Pair<Long, String>>()
+    /** 질문 하나 단위 읽기의 인자(방문자 · 주제 · 번호) */
+    val questionReads = mutableListOf<Triple<Long, String, Int>>()
+    /** 최근 시도 읽기가 받은 한도 */
+    val recentReadLimits = mutableListOf<Int>()
+
+    override fun attemptsOfTopic(visitorId: Long, topicPath: String): List<AttemptSummary> {
+        call("attemptsOfTopic")
+        topicReads += visitorId to topicPath
+        return ownedBy(visitorId).filter { it.topicPath == topicPath }.sortedBy { it.submittedAt }.map(::summaryOf)
+    }
+
+    override fun attemptsOfQuestion(visitorId: Long, topicPath: String, questionNumber: Int): List<StoredAttempt> {
+        call("attemptsOfQuestion")
+        questionReads += Triple(visitorId, topicPath, questionNumber)
+        return ownedBy(visitorId).filter { it.topicPath == topicPath && it.questionNumber == questionNumber }.sortedBy { it.submittedAt }
+    }
+
+    override fun recentAttemptsOf(visitorId: Long, limit: Int): List<AttemptSummary> {
+        call("recentAttemptsOf")
+        recentReadLimits += limit
+        return ownedBy(visitorId).sortedBy { it.submittedAt }.takeLast(limit).map(::summaryOf)
+    }
+
+    /** 테스트 준비 — 그 시도에 채점을 바로 붙인다(부른 것으로 세지 않는다) */
+    fun putGrade(attemptId: UUID, grade: Grade, gradedAt: Instant) {
+        attempts[attemptId] = attempts.getValue(attemptId).copy(grade = grade, gradedAt = gradedAt)
+    }
+
     override fun countAttemptsBetween(visitorId: Long, from: Instant, until: Instant): Int {
         call("countAttemptsBetween")
         return ownedBy(visitorId).count { !it.submittedAt.isBefore(from) && it.submittedAt.isBefore(until) }

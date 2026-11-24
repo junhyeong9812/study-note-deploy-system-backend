@@ -70,6 +70,18 @@ interface ProgressRecords {
     fun recordGrade(visitorId: Long, attemptId: UUID, grade: Grade, gradedAt: Instant): StoredAttempt?
     /** 낸 시각 오름차순 — 답 본문 없이(본문 칸을 읽지 않는다, 명세 16) */
     fun attemptsOf(visitorId: Long): List<AttemptSummary>
+    /**
+     * 이 방문자의 그 주제 시도만(명세 18.2 — 주제 조건의 질의와 색인, 방문자의 모든 시도를 화면마다 읽지 않는다).
+     * 낸 시각 오름차순 — 답 본문 없이(명세 16). 질문 목록의 상태 계산이 쓴다.
+     */
+    fun attemptsOfTopic(visitorId: Long, topicPath: String): List<AttemptSummary>
+    /** 이 방문자의 그 질문 하나의 시도 — 답 본문 포함(쓴 답의 본문은 질문 하나 단위로만 읽는다, 명세 16). 낸 시각 오름차순 */
+    fun attemptsOfQuestion(visitorId: Long, topicPath: String, questionNumber: Int): List<StoredAttempt>
+    /**
+     * 이 방문자의 가장 최근 시도 [limit] 줄까지(명세 18.2 — 복습 목록의 읽는 줄 수 상한, 넘으면 최근 것부터).
+     * 돌려주는 차례는 낸 시각 오름차순 — 답 본문 없이.
+     */
+    fun recentAttemptsOf(visitorId: Long, limit: Int): List<AttemptSummary>
     /** [from, until) 사이에 낸 시도의 수 */
     fun countAttemptsBetween(visitorId: Long, from: Instant, until: Instant): Int
     fun countAttempts(visitorId: Long): Int

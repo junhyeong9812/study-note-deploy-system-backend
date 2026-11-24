@@ -282,6 +282,13 @@ class ProgressStore(
     override fun attemptsOf(visitorId: Long): List<AttemptSummary> =
         reach { database -> database.query("SELECT $SUMMARY_COLUMNS WHERE a.visitor_id = ? ORDER BY a.submitted_at, a.attempt_id", summaryRow, visitorId) }
 
+    // 뼈대 — task 03b 의 구현 워커가 채운다(계약은 ProgressRecords 의 주석 · QuizRecordsEngineTest)
+    override fun attemptsOfTopic(visitorId: Long, topicPath: String): List<AttemptSummary> = TODO("03b")
+
+    override fun attemptsOfQuestion(visitorId: Long, topicPath: String, questionNumber: Int): List<StoredAttempt> = TODO("03b")
+
+    override fun recentAttemptsOf(visitorId: Long, limit: Int): List<AttemptSummary> = TODO("03b")
+
     override fun countAttemptsBetween(visitorId: Long, from: Instant, until: Instant): Int =
         reach { database -> database.queryForObject(
             "SELECT count(*) FROM quiz_attempt WHERE visitor_id = ? AND submitted_at >= ? AND submitted_at < ?",
