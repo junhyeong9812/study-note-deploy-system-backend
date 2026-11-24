@@ -74,7 +74,7 @@ class StudyProgressService(
         const val DAILY_ATTEMPT_LIMIT = 1_000
         val RETENTION: Period = Period.ofYears(1)
         const val PURGE_BATCH_SIZE = 500
-        /** 메인이 정할 값 — 뼈대의 임시값 */
+        /** 한 실행의 총량 상한 — 넘는 만큼은 다음 날의 실행이 이어 지운다 */
         const val PURGE_MAX_PER_RUN = 50_000
     }
 
@@ -108,12 +108,19 @@ class StudyProgressService(
     }
 
     /**
-     * 답을 덧붙인다. 길이 검증이 먼저(방문자 · 토큰을 만들기 전), 모르는 방문자면 여기서 처음 토큰을 발급한다.
+     * 답을 덧붙인다. 입력 검사(NUL · 길이)가 먼저(저장소 · 토큰 발급에 닿기 전), 모르는 방문자면 여기서 처음 토큰을 발급하고
+     * 방문자 줄과 시도를 한 묶음으로 넣는다(명세 15 — 시도가 저장되지 않으면 방문자 줄도 남지 않는다).
      * 확인 불가(DB 오류)면 발급하지 않는다. 로그에는 주제 · 질문 번호 · 길이 · 결과만 — 답의 본문 · 토큰은 쓰지 않는다.
      */
     fun submitAnswer(requestId: String, presentedToken: String?, submission: AnswerSubmission): SubmitOutcome {
         val subject = "topic=${submission.topicPath} question=${submission.questionNumber}"
         val length = submission.answer.codePointCount(0, submission.answer.length)
+        // PostgreSQL 의 글 칸은 NUL 을 담지 못한다 — 저장소 장애가 아니라 잘못된 입력이다(그래서 ERROR 로 남기지 않는다)
+        val textFields = listOf(submission.answer, submission.topicPath, submission.contentSha, submission.questionHash)
+        if (textFields.any { it.contains('\u0000') }) {
+            requestLog.log(requestId, "progress answer rejected(invalid input: NUL) question=${submission.questionNumber} length=$length", "warning")
+            return SubmitOutcome.InvalidInput
+        }
         if (length > ANSWER_MAX_CHARS) {
             requestLog.log(requestId, "progress answer rejected(too long) $subject length=$length", "warning")
             return SubmitOutcome.AnswerTooLong
@@ -121,34 +128,38 @@ class StudyProgressService(
         val now = clock.instant()
         val today = ReviewSchedule.dateOf(now)
         try {
-            var issuedToken: String? = null
             val visitor = when (val lookup = identify(requestId, presentedToken)) {
                 is VisitorLookup.Found -> lookup.visitor
                 VisitorLookup.Unavailable -> return SubmitOutcome.StorageUnavailable
                 VisitorLookup.Unknown -> {
                     val token = issueToken()
-                    records.createVisitor(VisitorToken.hash(token), today, now).also { issuedToken = token }
+                    val stored = records.recordFirstAttempt(VisitorToken.hash(token), today, submission, now)
+                    if (stored == null) {
+                        requestLog.log(requestId, "progress answer rejected(attempt id taken) $subject newVisitor=true", "warning")
+                        return SubmitOutcome.AttemptIdTaken
+                    }
+                    requestLog.log(requestId, "progress answer saved $subject length=$length newVisitor=true")
+                    return SubmitOutcome.Saved(stored, token, newVisitor = true)
                 }
             }
+            val cookieToken = presentedToken!!      // Found 는 꼴이 맞는 제시된 토큰에서만 나온다
             // 단순화: 세고 나서 넣는다(원자적이 아니다) — 한 방문자의 요청이 동시에 몰리면 상한을 그 동시 수만큼 넘길 수 있다(1,000 에 몇 건).
             // 정확히 막아야 하면 방문자 줄을 잠그고(SELECT ... FOR UPDATE) 세기와 넣기를 한 트랜잭션으로 묶는다.
-            if (issuedToken == null) {
-                val dayStart = today.atStartOfDay(ReviewSchedule.ZONE).toInstant()
-                val dayEnd = today.plusDays(1).atStartOfDay(ReviewSchedule.ZONE).toInstant()
-                if (records.countAttemptsBetween(visitor.id, dayStart, dayEnd) >= DAILY_ATTEMPT_LIMIT) {
-                    // 상한에 닿은 뒤에도 이미 저장한 시도의 재전송(두 번 눌림)은 처음 결과를 돌려준다
-                    records.findAttempt(visitor.id, submission.attemptId)?.let { return SubmitOutcome.Saved(it, presentedToken!!, false) }
-                    requestLog.log(requestId, "progress answer rejected(daily limit) $subject length=$length", "warning")
-                    return SubmitOutcome.DailyLimitReached
-                }
+            val dayStart = today.atStartOfDay(ReviewSchedule.ZONE).toInstant()
+            val dayEnd = today.plusDays(1).atStartOfDay(ReviewSchedule.ZONE).toInstant()
+            if (records.countAttemptsBetween(visitor.id, dayStart, dayEnd) >= DAILY_ATTEMPT_LIMIT) {
+                // 상한에 닿은 뒤에도 이미 저장한 시도의 재전송(두 번 눌림)은 처음 결과를 돌려준다
+                records.findAttempt(visitor.id, submission.attemptId)?.let { return SubmitOutcome.Saved(it, cookieToken, newVisitor = false) }
+                requestLog.log(requestId, "progress answer rejected(daily limit) $subject length=$length", "warning")
+                return SubmitOutcome.DailyLimitReached
             }
             val stored = records.recordAttempt(visitor.id, submission, now)
             if (stored == null) {
                 requestLog.log(requestId, "progress answer rejected(attempt id taken) $subject", "warning")
                 return SubmitOutcome.AttemptIdTaken
             }
-            requestLog.log(requestId, "progress answer saved $subject length=$length newVisitor=${issuedToken != null}")
-            return SubmitOutcome.Saved(stored, issuedToken ?: presentedToken!!, issuedToken != null)
+            requestLog.log(requestId, "progress answer saved $subject length=$length newVisitor=false")
+            return SubmitOutcome.Saved(stored, cookieToken, newVisitor = false)
         } catch (error: DataAccessException) {
             logStorageFailure(requestId, "submit answer($subject)", error)
             return SubmitOutcome.StorageUnavailable
@@ -156,7 +167,19 @@ class StudyProgressService(
     }
 
     /** 방문자의 시도 목록(낸 시각 차례) — 쿠키 없음 · 모르는 토큰은 빈 목록이고 방문자를 만들지 않는다. DB 오류는 결과로(명세 15) */
-    fun attempts(requestId: String, presentedToken: String?): AttemptsOutcome = TODO("task 02 리뷰 루프 1")
+    fun attempts(requestId: String, presentedToken: String?): AttemptsOutcome {
+        val visitor = when (val lookup = identify(requestId, presentedToken)) {
+            is VisitorLookup.Found -> lookup.visitor
+            VisitorLookup.Unknown -> return AttemptsOutcome.Listed(emptyList())
+            VisitorLookup.Unavailable -> return AttemptsOutcome.StorageUnavailable
+        }
+        return try {
+            AttemptsOutcome.Listed(records.attemptsOf(visitor.id))
+        } catch (error: DataAccessException) {
+            logStorageFailure(requestId, "list attempts", error)
+            AttemptsOutcome.StorageUnavailable
+        }
+    }
 
     /** 스스로 고른 결과를 그 시도에 덧붙인다 — 모르는 방문자는 만들지 않는다 */
     fun grade(requestId: String, presentedToken: String?, attemptId: UUID, grade: Grade): GradeOutcome {
@@ -208,15 +231,27 @@ class StudyProgressService(
         }
     }
 
-    /** 마지막 방문이 한국 날짜로 [RETENTION] 전보다 앞선 방문자를 지운다. 어떤 실패도 던지지 않고 로그와 결과로 남긴다 */
+    /**
+     * 마지막 방문이 한국 날짜로 [RETENTION] 전보다 앞선 방문자를 지운다 — 한 묶음은 [purgeBatchSize] 명(한 문장이 시간 제한에
+     * 걸리지 않게), 남으면 되풀이하고 한 실행에서 [purgeMaxPerRun] 명에 닿으면 멈춰 남은 수를 결과와 로그에 남긴다(명세 15).
+     * 어떤 실패도 던지지 않고 로그와 결과로 남긴다 — 앞 묶음에서 지운 것은 그대로 지워진 채다.
+     */
     fun purgeInactiveVisitors(requestId: String): PurgeOutcome {
         val cutoff = today().minus(RETENTION)
+        var purged = 0
         return try {
-            val purged = records.deleteVisitorsLastVisitedBefore(cutoff, purgeBatchSize)
-            requestLog.log(requestId, "progress retention purged visitors=$purged lastVisitBefore=$cutoff")
-            PurgeOutcome.Purged(purged, 0)
+            while (purged < purgeMaxPerRun) {
+                val limit = minOf(purgeBatchSize, purgeMaxPerRun - purged)
+                val deleted = records.deleteVisitorsLastVisitedBefore(cutoff, limit)
+                purged += deleted
+                if (deleted < limit) break
+            }
+            val remaining = if (purged >= purgeMaxPerRun) records.countVisitorsLastVisitedBefore(cutoff) else 0
+            val level = if (remaining > 0) "warning" else "info"
+            requestLog.log(requestId, "progress retention purged visitors=$purged remaining=$remaining lastVisitBefore=$cutoff", level)
+            PurgeOutcome.Purged(purged, remaining)
         } catch (error: Exception) {
-            requestLog.log(requestId, "progress retention failed: ${error.javaClass.simpleName} lastVisitBefore=$cutoff", "error")
+            requestLog.log(requestId, "progress retention failed: ${error.javaClass.simpleName} purgedBeforeFailure=$purged lastVisitBefore=$cutoff", "error")
             PurgeOutcome.Failed
         }
     }
