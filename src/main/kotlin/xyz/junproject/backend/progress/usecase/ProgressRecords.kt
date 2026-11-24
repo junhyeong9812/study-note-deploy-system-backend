@@ -1,6 +1,7 @@
 package xyz.junproject.backend.progress.usecase
 
 import xyz.junproject.backend.progress.domain.Grade
+import xyz.junproject.backend.progress.domain.ReviewedAttempt
 import java.time.Instant
 import java.time.LocalDate
 import java.util.UUID
@@ -44,7 +45,7 @@ data class AttemptSummary(
     val gradedAt: Instant?,
 ) {
     /** 복습 단계 계산([xyz.junproject.backend.progress.domain.ReviewSchedule.progressOf])에 넘기는 꼴 */
-    fun reviewed(): xyz.junproject.backend.progress.domain.ReviewedAttempt = TODO("task 02 리뷰 루프 2")
+    fun reviewed(): ReviewedAttempt = ReviewedAttempt(submittedAt, grade)
 }
 
 /**

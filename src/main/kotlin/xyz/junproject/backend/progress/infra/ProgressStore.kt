@@ -7,10 +7,13 @@ import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.jdbc.core.RowMapper
 import xyz.junproject.backend.progress.domain.Grade
 import xyz.junproject.backend.progress.usecase.AnswerSubmission
+import xyz.junproject.backend.progress.usecase.AttemptSummary
 import xyz.junproject.backend.progress.usecase.ProgressRecords
 import xyz.junproject.backend.progress.usecase.StoredAttempt
 import xyz.junproject.backend.progress.usecase.Visitor
 import java.sql.Connection
+import java.sql.SQLException
+import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
 import java.time.OffsetDateTime
@@ -20,16 +23,15 @@ import java.util.UUID
 /**
  * PostgreSQL 저장소 — 표 study_visitor · quiz_attempt · quiz_grade.
  * 표는 처음 닿을 때 만든다(만들기에 성공하기 전까지는 호출마다 다시 시도한다) — 뜬 직후의 미리 만들기는 설정이 부른다.
- * DB 에서 연결을 얻지 못하면 [unavailablePause] 동안은 DB 에 닿아 보지 않고 곧바로 실패한다(명세 15) — 요청마다 풀 대기(2초)를 치르지 않게.
+ * DB 에 연결을 만들지 못하면 [unavailablePause] 동안은 DB 에 닿아 보지 않고 곧바로 실패한다(명세 15 · 16) — 요청마다 풀 대기(2초)를 치르지 않게.
+ * 풀이 바닥나 기다리다 넘은 것 · SQL 오류는 그 요청만 실패한다(쉼을 걸지 않는다). 쉼은 흐른 시간([nanoTime])으로 잰다.
  * 시도 · 채점은 덧붙이기만 한다: 같은 번호는 `ON CONFLICT DO NOTHING` 뒤 다시 읽는다(고치지 않는다).
  */
 class ProgressStore(
     private val jdbc: JdbcTemplate,
-    /** DB 에 닿지 못한 뒤의 쉼을 재는 시계(명세 15) */
-    private val clock: java.time.Clock = java.time.Clock.systemUTC(),
-    /** DB 에 닿지 못한 직후 이 동안은 풀을 기다리지 않고 곧바로 DataAccessException 으로 실패한다(명세 15 — 짧은 쉼) */
-    private val unavailablePause: java.time.Duration = java.time.Duration.ofSeconds(5),
-    /** 쉼을 재는 흐른 시간(나노초, System.nanoTime 꼴 — 명세 16). 구현 뒤에는 위의 clock 을 없앤다 */
+    /** DB 에 연결을 만들지 못한 직후 이 동안은 풀을 기다리지 않고 곧바로 DataAccessException 으로 실패한다(명세 15 — 짧은 쉼) */
+    private val unavailablePause: Duration = Duration.ofSeconds(5),
+    /** 쉼을 재는 흐른 시간(나노초, System.nanoTime 꼴 — 명세 16). 벽시계가 뒤로 가도 쉼이 길어지지 않는다 */
     private val nanoTime: () -> Long = System::nanoTime,
 ) : ProgressRecords {
     private companion object {
@@ -72,6 +74,24 @@ class ProgressStore(
             """,
         )
 
+        /** 상태 계산용 — 답 본문 칸을 읽지 않는다(명세 16) */
+        const val SUMMARY_COLUMNS = """
+            a.attempt_id, a.topic_path, a.question_number, a.content_sha, a.question_hash, a.submitted_at, g.grade, g.graded_at
+            FROM quiz_attempt a LEFT JOIN quiz_grade g ON g.attempt_id = a.attempt_id"""
+
+        val summaryRow = RowMapper { row, _ ->
+            AttemptSummary(
+                attemptId = row.getObject("attempt_id", UUID::class.java),
+                topicPath = row.getString("topic_path"),
+                questionNumber = row.getInt("question_number"),
+                contentSha = row.getString("content_sha"),
+                questionHash = row.getString("question_hash"),
+                submittedAt = row.getObject("submitted_at", OffsetDateTime::class.java).toInstant(),
+                grade = row.getString("grade")?.let(Grade::valueOf),
+                gradedAt = row.getObject("graded_at", OffsetDateTime::class.java)?.toInstant(),
+            )
+        }
+
         const val ATTEMPT_COLUMNS = """
             a.attempt_id, a.topic_path, a.question_number, a.answer, a.content_sha, a.question_hash, a.submitted_at, g.grade, g.graded_at
             FROM quiz_attempt a LEFT JOIN quiz_grade g ON g.attempt_id = a.attempt_id"""
@@ -93,24 +113,66 @@ class ProgressStore(
         val visitorRow = RowMapper { row, _ -> Visitor(row.getLong("id"), row.getObject("last_visit_on", LocalDate::class.java)) }
 
         fun timestamp(instant: Instant): OffsetDateTime = instant.atOffset(ZoneOffset.UTC)
+
+        /**
+         * 연결을 "만들지 못한" 것인가 — 풀의 실패를 원인 사슬의 칸으로 가른다(메시지 글자는 읽지 않는다).
+         * 닿지 못함: HikariCP 는 마지막 연결 만들기의 실패를 원인으로 달고 그 SQL 상태를 옮겨 싣는다 — 사슬에 SQL 상태 부류 `08`
+         * (SQL 표준의 "연결 예외", pgjdbc 의 연결 거부 · 끊김은 08001 · 08006)이나 소켓의 연결 실패가 있다.
+         * 풀 바닥(연결이 모두 쓰이는 중 — DB 는 멀쩡): 원인도 SQL 상태도 없다 → 아니다.
+         */
+        fun couldNotConnect(error: Throwable): Boolean =
+            generateSequence(error) { current -> current.cause?.takeIf { it !== current } }.take(16).any { cause ->
+                (cause is SQLException && cause.sqlState?.startsWith("08") == true) ||
+                    cause is java.net.ConnectException || cause is java.net.UnknownHostException
+            }
+
+        const val INSERT_ATTEMPT = """
+            INSERT INTO quiz_attempt (attempt_id, visitor_id, topic_path, question_number, answer, content_sha, question_hash, submitted_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (attempt_id) DO NOTHING"""
+
+        /** 시도 한 줄을 넣는다(같은 번호면 아무것도 하지 않는다) */
+        fun insertAttempt(connection: Connection, visitorId: Long, submission: AnswerSubmission, submittedAt: Instant) {
+            connection.prepareStatement(INSERT_ATTEMPT.trimIndent()).use { statement ->
+                statement.setObject(1, submission.attemptId)
+                statement.setLong(2, visitorId)
+                statement.setString(3, submission.topicPath)
+                statement.setInt(4, submission.questionNumber)
+                statement.setString(5, submission.answer)
+                statement.setString(6, submission.contentSha)
+                statement.setString(7, submission.questionHash)
+                statement.setObject(8, timestamp(submittedAt))
+                statement.executeUpdate()
+            }
+        }
+
+        /** 그 방문자의 그 시도(채점 포함) — 없거나 남의 것이면 null */
+        fun readAttempt(connection: Connection, visitorId: Long, attemptId: UUID): StoredAttempt? =
+            connection.prepareStatement("SELECT $ATTEMPT_COLUMNS WHERE a.attempt_id = ? AND a.visitor_id = ?").use { statement ->
+                statement.setObject(1, attemptId)
+                statement.setLong(2, visitorId)
+                statement.executeQuery().use { result -> if (result.next()) attemptRow.mapRow(result, 0) else null }
+            }
     }
 
     @Volatile private var schemaReady = false
-    /** 연결을 얻지 못한 때부터 [unavailablePause] 뒤 — 그 전까지는 DB 에 닿아 보지 않는다. null 이면 쉬지 않는다 */
-    @Volatile private var pausedUntil: Instant? = null
+    /** 연결을 만들지 못한 때의 [nanoTime] — 그때부터 [unavailablePause] 동안은 DB 에 닿아 보지 않는다. null 이면 쉬지 않는다 */
+    @Volatile private var pausedAtNanos: Long? = null
 
     /**
-     * DB 에 닿는 모든 일의 입구 — 쉼 동안이면 곧바로 실패하고(쉼을 늘리지 않는다), 연결을 얻지 못하면 쉼을 건다.
-     * 쉼은 "연결을 얻지 못함"에만 건다 — 키 충돌 같은 SQL 오류에 걸면 잘못된 요청 하나가 모든 기록 요청을 막는다.
+     * DB 에 닿는 모든 일의 입구 — 쉼 동안이면 곧바로 실패하고(쉼을 늘리지 않는다), 연결을 만들지 못했으면 쉼을 건다.
+     * 쉼은 [couldNotConnect] 에만 건다 — 풀 바닥에 걸면 DB 가 멀쩡해도 바쁜 순간마다 모든 기록 요청이 쉼 동안 실패하고(실측),
+     * 키 충돌 같은 SQL 오류에 걸면 잘못된 요청 하나가 모든 기록 요청을 막는다.
      */
     private fun <T> guarded(work: () -> T): T {
-        pausedUntil?.let { until ->
-            if (clock.instant().isBefore(until)) throw DataAccessResourceFailureException("study db unreachable recently — not retrying yet")
+        pausedAtNanos?.let { pausedAt ->
+            if (nanoTime() - pausedAt < unavailablePause.toNanos()) {
+                throw DataAccessResourceFailureException("study db unreachable recently — not retrying yet")
+            }
         }
         try {
             return work()
         } catch (error: CannotGetJdbcConnectionException) {
-            pausedUntil = clock.instant().plus(unavailablePause)
+            if (couldNotConnect(error)) pausedAtNanos = nanoTime()
             throw error
         }
     }
@@ -172,36 +234,46 @@ class ProgressStore(
         reach { database -> database.update("UPDATE study_visitor SET last_visit_on = ? WHERE id = ? AND last_visit_on < ?", today, visitorId, today) }
     }
 
-    override fun recordAttempt(visitorId: Long, submission: AnswerSubmission, submittedAt: Instant): StoredAttempt? {
-        reach { database -> database.update(
-            """
-            INSERT INTO quiz_attempt (attempt_id, visitor_id, topic_path, question_number, answer, content_sha, question_hash, submitted_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (attempt_id) DO NOTHING
-            """.trimIndent(),
-            submission.attemptId, visitorId, submission.topicPath, submission.questionNumber, submission.answer,
-            submission.contentSha, submission.questionHash, timestamp(submittedAt)) }
-        // 새로 넣었든 이미 있었든 저장된 줄을 다시 읽는다 — 동시에 넣은 쪽들이 모두 같은 줄을 받는다. 남의 줄이면 null
-        return findAttempt(visitorId, submission.attemptId)
-    }
+    /**
+     * 넣기와 그 결과 읽기는 연결 한 번에서(명세 16) — 넣은 뒤에 쉼이 걸려도 저장된 줄이 돌아온다.
+     * 두 문장이다: 한 문장(CTE)으로 묶으면 같은 문장의 SELECT 가 방금 넣은 줄을 보지 못한다.
+     * 새로 넣었든 이미 있었든 저장된 줄을 다시 읽는다 — 동시에 넣은 쪽들이 모두 같은 줄을 받는다. 남의 줄이면 null
+     */
+    override fun recordAttempt(visitorId: Long, submission: AnswerSubmission, submittedAt: Instant): StoredAttempt? =
+        reach { database ->
+            database.execute(ConnectionCallback { connection ->
+                insertAttempt(connection, visitorId, submission, submittedAt)
+                readAttempt(connection, visitorId, submission.attemptId)
+            })
+        }
 
     override fun findAttempt(visitorId: Long, attemptId: UUID): StoredAttempt? =
-        reach { database -> database.query("SELECT $ATTEMPT_COLUMNS WHERE a.attempt_id = ? AND a.visitor_id = ?", attemptRow, attemptId, visitorId).singleOrNull() }
+        reach { database -> database.execute(ConnectionCallback { connection -> readAttempt(connection, visitorId, attemptId) }) }
 
-    override fun recordGrade(visitorId: Long, attemptId: UUID, grade: Grade, gradedAt: Instant): StoredAttempt? {
-        reach { database -> database.update(
-            """
-            INSERT INTO quiz_grade (attempt_id, grade, graded_at)
-            SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM quiz_attempt WHERE attempt_id = ? AND visitor_id = ?)
-            ON CONFLICT (attempt_id) DO NOTHING
-            """.trimIndent(),
-            attemptId, grade.name, timestamp(gradedAt), attemptId, visitorId) }
-        return findAttempt(visitorId, attemptId)
-    }
+    /** 채점 넣기와 그 결과 읽기도 연결 한 번에서(명세 16). 이 방문자의 시도가 아니면 넣지 않고 null */
+    override fun recordGrade(visitorId: Long, attemptId: UUID, grade: Grade, gradedAt: Instant): StoredAttempt? =
+        reach { database ->
+            database.execute(ConnectionCallback { connection ->
+                connection.prepareStatement(
+                    """
+                    INSERT INTO quiz_grade (attempt_id, grade, graded_at)
+                    SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM quiz_attempt WHERE attempt_id = ? AND visitor_id = ?)
+                    ON CONFLICT (attempt_id) DO NOTHING
+                    """.trimIndent(),
+                ).use { statement ->
+                    statement.setObject(1, attemptId)
+                    statement.setString(2, grade.name)
+                    statement.setObject(3, timestamp(gradedAt))
+                    statement.setObject(4, attemptId)
+                    statement.setLong(5, visitorId)
+                    statement.executeUpdate()
+                }
+                readAttempt(connection, visitorId, attemptId)
+            })
+        }
 
-    override fun attemptsOf(visitorId: Long): List<xyz.junproject.backend.progress.usecase.AttemptSummary> =
-        reach { database -> database.query("SELECT $ATTEMPT_COLUMNS WHERE a.visitor_id = ? ORDER BY a.submitted_at, a.attempt_id", attemptRow, visitorId) }
-            .map { xyz.junproject.backend.progress.usecase.AttemptSummary(it.attemptId, it.topicPath, it.questionNumber, it.contentSha, it.questionHash,
-                it.submittedAt, it.grade, it.gradedAt) }   // 컴파일용 임시 — 본문 칸을 읽지 않게 고칠 것(task 02 리뷰 루프 2)
+    override fun attemptsOf(visitorId: Long): List<AttemptSummary> =
+        reach { database -> database.query("SELECT $SUMMARY_COLUMNS WHERE a.visitor_id = ? ORDER BY a.submitted_at, a.attempt_id", summaryRow, visitorId) }
 
     override fun countAttemptsBetween(visitorId: Long, from: Instant, until: Instant): Int =
         reach { database -> database.queryForObject(
@@ -235,27 +307,8 @@ class ProgressStore(
                     statement.setObject(3, timestamp(submittedAt))
                     statement.executeQuery().use { result -> result.next(); result.getLong(1) }
                 }
-                connection.prepareStatement(
-                    """
-                    INSERT INTO quiz_attempt (attempt_id, visitor_id, topic_path, question_number, answer, content_sha, question_hash, submitted_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (attempt_id) DO NOTHING
-                    """.trimIndent(),
-                ).use { statement ->
-                    statement.setObject(1, submission.attemptId)
-                    statement.setLong(2, visitorId)
-                    statement.setString(3, submission.topicPath)
-                    statement.setInt(4, submission.questionNumber)
-                    statement.setString(5, submission.answer)
-                    statement.setString(6, submission.contentSha)
-                    statement.setString(7, submission.questionHash)
-                    statement.setObject(8, timestamp(submittedAt))
-                    statement.executeUpdate()
-                }
-                val stored = connection.prepareStatement("SELECT $ATTEMPT_COLUMNS WHERE a.attempt_id = ? AND a.visitor_id = ?").use { statement ->
-                    statement.setObject(1, submission.attemptId)
-                    statement.setLong(2, visitorId)
-                    statement.executeQuery().use { result -> if (result.next()) attemptRow.mapRow(result, 0) else null }
-                }
+                insertAttempt(connection, visitorId, submission, submittedAt)
+                val stored = readAttempt(connection, visitorId, submission.attemptId)
                 if (stored == null) connection.rollback()        // 남의 번호 — 방금 만든 방문자 줄까지 되돌린다
                 stored
             }
