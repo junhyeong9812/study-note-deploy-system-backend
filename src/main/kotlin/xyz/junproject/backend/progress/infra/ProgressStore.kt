@@ -29,6 +29,8 @@ class ProgressStore(
     private val clock: java.time.Clock = java.time.Clock.systemUTC(),
     /** DB 에 닿지 못한 직후 이 동안은 풀을 기다리지 않고 곧바로 DataAccessException 으로 실패한다(명세 15 — 짧은 쉼) */
     private val unavailablePause: java.time.Duration = java.time.Duration.ofSeconds(5),
+    /** 쉼을 재는 흐른 시간(나노초, System.nanoTime 꼴 — 명세 16). 구현 뒤에는 위의 clock 을 없앤다 */
+    private val nanoTime: () -> Long = System::nanoTime,
 ) : ProgressRecords {
     private companion object {
         /** 표 만들기를 줄 세우는 잠금 번호 — 두 자리가 동시에 `CREATE ... IF NOT EXISTS` 를 돌리면 카탈로그 키 충돌로 한쪽이 깨진다(실측) */
@@ -196,8 +198,10 @@ class ProgressStore(
         return findAttempt(visitorId, attemptId)
     }
 
-    override fun attemptsOf(visitorId: Long): List<StoredAttempt> =
+    override fun attemptsOf(visitorId: Long): List<xyz.junproject.backend.progress.usecase.AttemptSummary> =
         reach { database -> database.query("SELECT $ATTEMPT_COLUMNS WHERE a.visitor_id = ? ORDER BY a.submitted_at, a.attempt_id", attemptRow, visitorId) }
+            .map { xyz.junproject.backend.progress.usecase.AttemptSummary(it.attemptId, it.topicPath, it.questionNumber, it.contentSha, it.questionHash,
+                it.submittedAt, it.grade, it.gradedAt) }   // 컴파일용 임시 — 본문 칸을 읽지 않게 고칠 것(task 02 리뷰 루프 2)
 
     override fun countAttemptsBetween(visitorId: Long, from: Instant, until: Instant): Int =
         reach { database -> database.queryForObject(

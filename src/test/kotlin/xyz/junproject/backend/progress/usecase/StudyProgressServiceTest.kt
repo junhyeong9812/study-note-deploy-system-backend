@@ -448,7 +448,7 @@ class StudyProgressServiceTest {
         val later = records.put(mine.id, submission(answer = "나중"), now.plusSeconds(60))
         val earlier = records.put(mine.id, submission(answer = "먼저"), now)
         records.put(other.id, submission(answer = "남의 것"), now.minusSeconds(60))
-        assertEquals(AttemptsOutcome.Listed(listOf(earlier, later)), service().attempts("req-1", mineToken))
+        assertEquals(AttemptsOutcome.Listed(listOf(summaryOf(earlier), summaryOf(later))), service().attempts("req-1", mineToken))
     }
 
     @Test
@@ -467,6 +467,43 @@ class StudyProgressServiceTest {
         assertEquals(AttemptsOutcome.StorageUnavailable, service().attempts("req-1", token))
         records.failing.clear(); records.failing += "findVisitor"
         assertEquals(AttemptsOutcome.StorageUnavailable, service().attempts("req-2", token))
+    }
+
+    // ── 리뷰 루프 2 반영(명세 16) ─────────────────────────
+
+    @Test
+    fun `내용 SHA 나 질문 해시에 NUL 이 있으면 저장소에 닿지 않고 잘못된 입력으로 거절한다`() {
+        val (token, _) = knownVisitor()
+        assertEquals(SubmitOutcome.InvalidInput, service().submitAnswer("req-1", token, submission().copy(contentSha = "a\u0000b")))
+        assertEquals(SubmitOutcome.InvalidInput, service().submitAnswer("req-2", null, submission().copy(questionHash = "\u0000")))
+        assertEquals(emptyList<String>(), records.calls)
+        assertEquals(0, tokenIssueCount)
+        assertTrue(logs.lines.none { it.startsWith("ERROR") }, logs.lines.toString())
+    }
+
+    @Test
+    fun `보관 삭제가 둘째 묶음에서 실패하면 던지지 않고 실패로 돌아오며 앞 묶음에서 지운 수를 로그에 남긴다`() {
+        repeat(8) { knownVisitor(token = "E$it".padEnd(43, 'e'), lastVisitOn = LocalDate.of(2025, 1, 1)) }
+        records.purgeFailAtBatch = 2
+        val outcome = service(purgeBatchSize = 3, purgeMaxPerRun = 100).purgeInactiveVisitors("req-1")
+        assertEquals(PurgeOutcome.Failed, outcome)
+        assertEquals(5, records.visitorsByHash.size)                      // 첫 묶음 3명만 지워졌다
+        val errors = logs.lines.filter { it.startsWith("ERROR") }
+        assertTrue(errors.any { it.contains("purgedBeforeFailure=3") }, logs.lines.toString())
+    }
+
+    @Test
+    fun `상태 계산용 시도 줄에는 답 본문이 없고 복습 단계 계산에 그대로 넘길 수 있다`() {
+        assertFalse(AttemptSummary::class.members.any { it.name == "answer" }, "AttemptSummary 에 답 본문 칸이 있다")
+        val (token, visitor) = knownVisitor()
+        val first = records.put(visitor.id, submission(answer = "첫 답"), Instant.parse("2026-11-25T01:00:00Z"))
+        records.recordGrade(visitor.id, first.attemptId, Grade.CORRECT, Instant.parse("2026-11-25T01:01:00Z"))
+        val listed = service().attempts("req-1", token) as AttemptsOutcome.Listed
+        assertEquals(listOf(xyz.junproject.backend.progress.domain.ReviewedAttempt(Instant.parse("2026-11-25T01:00:00Z"), Grade.CORRECT)),
+            listed.attempts.map { it.reviewed() })
+        assertEquals(xyz.junproject.backend.progress.domain.QuestionProgress(xyz.junproject.backend.progress.domain.ReviewStage.ONE_DAY,
+            LocalDate.of(2026, 11, 26), false),
+            xyz.junproject.backend.progress.domain.ReviewSchedule.progressOf(listed.attempts.map { it.reviewed() }))
     }
 
     /** 연결을 줄 수 없는 DB */

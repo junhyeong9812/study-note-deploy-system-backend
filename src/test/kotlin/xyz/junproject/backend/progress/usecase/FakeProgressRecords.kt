@@ -70,7 +70,10 @@ class FakeProgressRecords : ProgressRecords {
 
     private fun ownedBy(visitorId: Long) = attempts.values.filter { attemptOwners[it.attemptId] == visitorId }
 
-    override fun attemptsOf(visitorId: Long): List<StoredAttempt> { call("attemptsOf"); return ownedBy(visitorId).sortedBy { it.submittedAt } }
+    override fun attemptsOf(visitorId: Long): List<AttemptSummary> {
+        call("attemptsOf")
+        return ownedBy(visitorId).sortedBy { it.submittedAt }.map(::summaryOf)
+    }
 
     override fun countAttemptsBetween(visitorId: Long, from: Instant, until: Instant): Int {
         call("countAttemptsBetween")
@@ -94,6 +97,9 @@ class FakeProgressRecords : ProgressRecords {
         return put(visitor.id, submission, submittedAt)
     }
 
+    /** 몇 번째 묶음(1부터)에서 DB 오류로 실패할지 — null 이면 실패하지 않는다 */
+    var purgeFailAtBatch: Int? = null
+
     /** 보관 삭제의 묶음마다 받은 한도 */
     val purgeLimits = mutableListOf<Int>()
 
@@ -101,6 +107,7 @@ class FakeProgressRecords : ProgressRecords {
         call("deleteVisitorsLastVisitedBefore")
         purgeCutoffs += cutoff
         purgeLimits += limit
+        if (purgeFailAtBatch == purgeLimits.size) throw DataAccessResourceFailureException("connection lost mid purge (fake)")
         val expired = visitorsByHash.values.filter { it.lastVisitOn.isBefore(cutoff) }.take(limit)
         expired.forEach { visitor ->
             ownedBy(visitor.id).forEach { attempts.remove(it.attemptId); attemptOwners.remove(it.attemptId) }
@@ -114,3 +121,7 @@ class FakeProgressRecords : ProgressRecords {
         return visitorsByHash.values.count { it.lastVisitOn.isBefore(cutoff) }
     }
 }
+
+/** 저장된 시도에서 본문을 뺀 상태 계산용 줄 — 테스트가 기대값을 만들 때 쓴다 */
+fun summaryOf(stored: StoredAttempt) = AttemptSummary(stored.attemptId, stored.topicPath, stored.questionNumber, stored.contentSha,
+    stored.questionHash, stored.submittedAt, stored.grade, stored.gradedAt)

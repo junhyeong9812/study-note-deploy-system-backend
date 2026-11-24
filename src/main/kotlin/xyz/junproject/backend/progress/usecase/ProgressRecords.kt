@@ -31,6 +31,23 @@ data class StoredAttempt(
 )
 
 /**
+ * 상태 계산용 시도 한 줄 — 쓴 답의 본문은 싣지 않는다(명세 16). 본문은 질문 하나 단위로만 읽는다(03b).
+ */
+data class AttemptSummary(
+    val attemptId: UUID,
+    val topicPath: String,
+    val questionNumber: Int,
+    val contentSha: String,
+    val questionHash: String,
+    val submittedAt: Instant,
+    val grade: Grade?,
+    val gradedAt: Instant?,
+) {
+    /** 복습 단계 계산([xyz.junproject.backend.progress.domain.ReviewSchedule.progressOf])에 넘기는 꼴 */
+    fun reviewed(): xyz.junproject.backend.progress.domain.ReviewedAttempt = TODO("task 02 리뷰 루프 2")
+}
+
+/**
  * 방문자 · 시도 · 채점의 저장소. DB 오류는 예외(스프링의 DataAccessException)로 던진다 — "없음"과 "확인 불가"를 가른다.
  * 시도와 채점은 덧붙이기만 한다(어느 줄도 고치지 않는다).
  */
@@ -46,8 +63,8 @@ interface ProgressRecords {
     fun findAttempt(visitorId: Long, attemptId: UUID): StoredAttempt?
     /** 이 방문자의 시도가 아니면 null. 이미 채점했으면 첫 채점을 그대로 둔 채 돌려준다 */
     fun recordGrade(visitorId: Long, attemptId: UUID, grade: Grade, gradedAt: Instant): StoredAttempt?
-    /** 낸 시각 오름차순 */
-    fun attemptsOf(visitorId: Long): List<StoredAttempt>
+    /** 낸 시각 오름차순 — 답 본문 없이(본문 칸을 읽지 않는다, 명세 16) */
+    fun attemptsOf(visitorId: Long): List<AttemptSummary>
     /** [from, until) 사이에 낸 시도의 수 */
     fun countAttemptsBetween(visitorId: Long, from: Instant, until: Instant): Int
     fun countAttempts(visitorId: Long): Int

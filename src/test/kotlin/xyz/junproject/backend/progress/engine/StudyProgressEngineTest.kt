@@ -17,6 +17,7 @@ import xyz.junproject.backend.progress.usecase.GradeOutcome
 import xyz.junproject.backend.progress.usecase.StudyProgressService
 import xyz.junproject.backend.progress.usecase.SubmitOutcome
 import xyz.junproject.backend.progress.usecase.VisitorLookup
+import xyz.junproject.backend.progress.usecase.summaryOf
 import xyz.junproject.backend.progress.usecase.AttemptsOutcome
 import xyz.junproject.backend.progress.usecase.PurgeOutcome
 import java.util.concurrent.Callable
@@ -99,12 +100,12 @@ class StudyProgressEngineTest {
             assertNotEquals(forged, intruderToken)
 
             val intruderVisitor = (service.identify("req-3", intruderToken) as VisitorLookup.Found).visitor
-            assertEquals(listOf("침입자의 답"), store.attemptsOf(intruderVisitor.id).map { it.answer })
+            assertEquals(listOf("침입자의 답"), store.attemptsOf(intruderVisitor.id).map { store.findAttempt(intruderVisitor.id, it.attemptId)?.answer })
             assertEquals(GradeOutcome.AttemptNotFound, service.grade("req-4", intruderToken, owner.attempt.attemptId, Grade.WRONG))
             assertEquals(DeleteOutcome.Deleted(1), service.deleteMine("req-5", intruderToken))
 
             val ownerVisitor = (service.identify("req-6", owner.cookieToken) as VisitorLookup.Found).visitor
-            assertEquals(listOf("주인의 답" to null), store.attemptsOf(ownerVisitor.id).map { it.answer to it.grade })
+            assertEquals(listOf("주인의 답" to null), store.attemptsOf(ownerVisitor.id).map { store.findAttempt(ownerVisitor.id, it.attemptId)?.answer to it.grade })
         }
     }
 
@@ -185,7 +186,7 @@ class StudyProgressEngineTest {
                     val saved = outcomes.filterIsInstance<SubmitOutcome.Saved>()
                     assertEquals(1, saved.size, "${round}번째: $outcomes")
                     val loser = outcomes.single { it !is SubmitOutcome.Saved }
-                    assertTrue(loser == SubmitOutcome.AttemptIdTaken || loser == SubmitOutcome.StorageUnavailable, "${round}번째 진 쪽: $loser")
+                    assertEquals(SubmitOutcome.AttemptIdTaken, loser, "${round}번째 진 쪽")
                     assertEquals(visitorsBefore + 1, count("study_visitor"), "${round}번째: $outcomes")
                     assertEquals(attemptsBefore + 1, count("quiz_attempt"), "${round}번째: $outcomes")
                     val owner = (slots[0].identify("req-check", saved.single().cookieToken) as VisitorLookup.Found).visitor
@@ -217,7 +218,7 @@ class StudyProgressEngineTest {
             val service = service(logs)
             val mine = service.submitAnswer("req-1", null, submission("내 답")) as SubmitOutcome.Saved
             service.submitAnswer("req-2", null, submission("남의 답"))
-            assertEquals(AttemptsOutcome.Listed(listOf(mine.attempt)), service.attempts("req-3", mine.cookieToken))
+            assertEquals(AttemptsOutcome.Listed(listOf(summaryOf(mine.attempt))), service.attempts("req-3", mine.cookieToken))
             assertEquals(AttemptsOutcome.Listed(emptyList()), service.attempts("req-4", null))
             assertEquals(2, count("study_visitor"))
         }

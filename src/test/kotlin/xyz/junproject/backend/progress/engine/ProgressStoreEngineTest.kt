@@ -10,6 +10,7 @@ import org.springframework.jdbc.core.JdbcTemplate
 import xyz.junproject.backend.progress.domain.Grade
 import xyz.junproject.backend.progress.infra.ProgressStore
 import xyz.junproject.backend.progress.usecase.AnswerSubmission
+import xyz.junproject.backend.progress.usecase.summaryOf
 import java.time.Instant
 import java.time.LocalDate
 import java.util.UUID
@@ -135,7 +136,8 @@ class ProgressStoreEngineTest {
         val expected = xyz.junproject.backend.progress.usecase.StoredAttempt(submitted.attemptId, "cs/os/process", 1, "프로세스는 실행 중인 프로그램",
             "a".repeat(40), "b".repeat(64), now, null, null)
         assertEquals(expected, stored)
-        assertEquals(listOf(expected), store.attemptsOf(owner.id))
+        assertEquals(listOf(summaryOf(expected)), store.attemptsOf(owner.id))
+        assertEquals(expected, store.findAttempt(owner.id, submitted.attemptId))
     }
 
     @Test
@@ -182,7 +184,8 @@ class ProgressStoreEngineTest {
         store.recordAttempt(owner.id, submission(answer = "주인의 답", attemptId = attemptId), now)
         val xmin = xminOfAttempt(attemptId)
         assertNull(store.recordAttempt(other.id, submission(answer = "남의 답", attemptId = attemptId), now))
-        assertEquals(listOf("주인의 답"), store.attemptsOf(owner.id).map { it.answer })
+        assertEquals(listOf(attemptId), store.attemptsOf(owner.id).map { it.attemptId })
+        assertEquals("주인의 답", store.findAttempt(owner.id, attemptId)?.answer)
         assertEquals(emptyList<Any>(), store.attemptsOf(other.id))
         assertEquals(xmin, xminOfAttempt(attemptId))
     }
@@ -198,7 +201,7 @@ class ProgressStoreEngineTest {
         assertEquals(stored.copy(grade = Grade.CORRECT, gradedAt = gradedAt), graded)
         assertEquals(xmin, xminOfAttempt(submitted.attemptId), "채점이 시도 줄을 고쳤다")
         assertEquals(1, count("SELECT count(*) FROM quiz_grade WHERE attempt_id = ?", submitted.attemptId))
-        assertEquals(listOf(graded), store.attemptsOf(owner.id))
+        assertEquals(listOf(summaryOf(graded!!)), store.attemptsOf(owner.id))
     }
 
     @Test
@@ -323,7 +326,7 @@ class ProgressStoreEngineTest {
         assertEquals("첫 답", stored?.answer)
         val created = requireNotNull(store.findVisitor("f".repeat(64)))
         assertEquals(today, created.lastVisitOn)
-        assertEquals(listOf(stored), store.attemptsOf(created.id))
+        assertEquals(listOf(summaryOf(stored!!)), store.attemptsOf(created.id))
     }
 
     @Test
@@ -334,7 +337,8 @@ class ProgressStoreEngineTest {
         assertNull(store.recordFirstAttempt("f".repeat(64), today, submission(answer = "남의 답", attemptId = attemptId), now))
         assertNull(store.findVisitor("f".repeat(64)))
         assertEquals(1, count("SELECT count(*) FROM study_visitor"))
-        assertEquals(listOf("주인의 답"), store.attemptsOf(owner.id).map { it.answer })
+        assertEquals(listOf(attemptId), store.attemptsOf(owner.id).map { it.attemptId })
+        assertEquals("주인의 답", store.findAttempt(owner.id, attemptId)?.answer)
     }
 
     @Test
@@ -363,5 +367,46 @@ class ProgressStoreEngineTest {
         assertEquals(0, store.countVisitorsLastVisitedBefore(cutoff))
         assertEquals(listOf(onCutoff.id), jdbc.queryForList("SELECT id FROM study_visitor", Long::class.java))
         assertEquals(0, count("SELECT count(*) FROM quiz_attempt"))
+    }
+
+    // ── 리뷰 루프 2 반영(명세 16) ─────────────────────────
+
+    /** 실제 연결을 감싸 DB 로 보낸 SQL 글을 모은다(PreparedStatement · Statement 모두) */
+    private class SqlRecordingDataSource(private val delegate: javax.sql.DataSource) : org.springframework.jdbc.datasource.AbstractDataSource() {
+        val statements = java.util.concurrent.CopyOnWriteArrayList<String>()
+
+        private fun <T : Any> recording(target: T, type: Class<T>): T =
+            type.cast(java.lang.reflect.Proxy.newProxyInstance(type.classLoader, arrayOf(type)) { _, method, arguments ->
+                val text = arguments?.firstOrNull() as? String
+                if (text != null && (method.name.startsWith("prepare") || method.name.startsWith("execute") || method.name == "addBatch" ||
+                        method.name == "nativeSQL")) statements += text
+                val result = try { method.invoke(target, *(arguments ?: emptyArray())) } catch (error: java.lang.reflect.InvocationTargetException) { throw error.targetException }
+                if (method.name == "createStatement" && result is java.sql.Statement) recording(result, java.sql.Statement::class.java) else result
+            })
+
+        override fun getConnection(): java.sql.Connection = recording(delegate.connection, java.sql.Connection::class.java)
+        override fun getConnection(username: String?, password: String?): java.sql.Connection = getConnection()
+    }
+
+    @Test
+    fun `시도 목록은 답 본문 칸을 읽지 않는다 - 본문이 큰 줄이 있어도 질의 글에 answer 가 없다`() {
+        val owner = visitor("h".repeat(64))
+        val big = submission(answer = "가".repeat(200_000))
+        store.recordAttempt(owner.id, big, now)
+        store.recordGrade(owner.id, big.attemptId, Grade.CORRECT, now.plusSeconds(5))
+
+        val recording = SqlRecordingDataSource(blue)
+        val recordingStore = ProgressStore(JdbcTemplate(recording))
+        recordingStore.createSchema()
+        recording.statements.clear()
+        val listed = recordingStore.attemptsOf(owner.id)
+
+        assertEquals(listOf(big.attemptId), listed.map { it.attemptId })
+        assertEquals(listOf(Grade.CORRECT), listed.map { it.grade })
+        assertTrue(recording.statements.isNotEmpty(), "시도 목록이 DB 에 아무 SQL 도 보내지 않았다")
+        recording.statements.forEach { sql ->
+            assertFalse(sql.contains("answer", ignoreCase = true), "답 본문 칸을 읽는 질의: $sql")
+            assertFalse(Regex("""\*\s*(,|FROM)|\.\*""", RegexOption.IGNORE_CASE).containsMatchIn(sql), "모든 칸을 읽는 질의: $sql")
+        }
     }
 }

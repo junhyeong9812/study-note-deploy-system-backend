@@ -48,7 +48,7 @@ sealed interface DeleteOutcome {
 
 /** 방문자의 시도 목록 — 모르는 방문자는 빈 목록 */
 sealed interface AttemptsOutcome {
-    data class Listed(val attempts: List<StoredAttempt>) : AttemptsOutcome
+    data class Listed(val attempts: List<AttemptSummary>) : AttemptsOutcome
     data object StorageUnavailable : AttemptsOutcome
 }
 
