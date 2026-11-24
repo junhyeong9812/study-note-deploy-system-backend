@@ -126,6 +126,30 @@ class ProgressStoreUnavailableTest {
     }
 
     @Test
+    fun `쉼이 지난 뒤 다시 닿아 봐도 닿지 못하면 또 쉰다`() {
+        val dataSource = CountingFailingDataSource()
+        val elapsed = ElapsedTime()
+        val store = ProgressStore(JdbcTemplate(dataSource), unavailablePause = Duration.ofSeconds(5), nanoTime = elapsed::read)
+
+        assertThrows(DataAccessException::class.java) { store.findVisitor(hash) }   // 닿지 못함 → 첫 쉼
+        val afterFirstFailure = dataSource.connectionAttempts
+
+        elapsed.advance(Duration.ofSeconds(5).plusMillis(1))            // 첫 쉼이 지남 → 다시 닿아 본다(또 실패)
+        assertThrows(DataAccessException::class.java) { store.findVisitor(hash) }
+        val afterSecondFailure = dataSource.connectionAttempts
+        assertTrue(afterSecondFailure > afterFirstFailure, "첫 쉼이 지났는데 다시 닿아 보지 않았다")
+
+        elapsed.advance(Duration.ofMillis(1))                            // 둘째 실패 바로 뒤 — 다시 쉬어야 한다
+        assertThrows(DataAccessException::class.java) { store.findVisitor(hash) }
+        assertThrows(DataAccessException::class.java) { store.attemptsOf(1) }
+        assertEquals(afterSecondFailure, dataSource.connectionAttempts, "쉼이 지난 뒤 또 닿지 못했는데 다시 쉬지 않았다")
+
+        elapsed.advance(Duration.ofSeconds(5))                           // 둘째 실패부터 5.001초 — 둘째 쉼이 지남
+        assertThrows(DataAccessException::class.java) { store.findVisitor(hash) }
+        assertTrue(dataSource.connectionAttempts > afterSecondFailure, "둘째 쉼이 지났는데 다시 닿아 보지 않았다")
+    }
+
+    @Test
     fun `풀이 바닥나 기다리다 넘은 것은 DB 장애가 아니라 쉼을 걸지 않는다`() {
         val dataSource = CountingFailingDataSource(::poolExhausted)
         val store = ProgressStore(JdbcTemplate(dataSource), unavailablePause = Duration.ofSeconds(5), nanoTime = ElapsedTime()::read)
