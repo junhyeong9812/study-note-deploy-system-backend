@@ -56,7 +56,14 @@ class FakeNoteSource : NoteSourcePort {
 
     override fun allMarkdown(): List<String> = current.keys.sorted()
     override fun currentHead(): String = head
+    /**
+     * 다음 작업 트리 읽기 직전에 한 번 돈다 — 내용 동기화가 "지금 판의 SHA 를 읽은 뒤 · 파일을 읽기 전"에 끼어드는 순간을 만든다
+     * (그 안에서 [head] 와 [current] 를 바꾼다). 한 번 돌면 비워진다.
+     */
+    var syncBeforeNextRead: (() -> Unit)? = null
+
     override fun readFile(path: String): String {
+        syncBeforeNextRead?.let { sync -> syncBeforeNextRead = null; sync() }
         reads += path
         return current[path] ?: throw FileNotFoundException(path)
     }
