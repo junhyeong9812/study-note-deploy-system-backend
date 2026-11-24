@@ -115,10 +115,17 @@ class ProgressStore(
         fun timestamp(instant: Instant): OffsetDateTime = instant.atOffset(ZoneOffset.UTC)
 
         /**
-         * 연결을 "만들지 못한" 것인가 — 풀의 실패를 원인 사슬의 칸으로 가른다(메시지 글자는 읽지 않는다).
-         * 닿지 못함: HikariCP 는 마지막 연결 만들기의 실패를 원인으로 달고 그 SQL 상태를 옮겨 싣는다 — 사슬에 SQL 상태 부류 `08`
-         * (SQL 표준의 "연결 예외", pgjdbc 의 연결 거부 · 끊김은 08001 · 08006)이나 소켓의 연결 실패가 있다.
-         * 풀 바닥(연결이 모두 쓰이는 중 — DB 는 멀쩡): 원인도 SQL 상태도 없다 → 아니다.
+         * DB 에 닿지 못한 것인가 — 풀의 대기 초과 예외를 원인 사슬의 칸으로 가른다(메시지 글자는 읽지 않는다).
+         * 보는 칸: 사슬 안 SQLException 의 SQL 상태 부류 `08`(SQL 표준의 "연결 예외" — pgjdbc 의 연결 거부 08001 · 끊긴 연결 08003 · 08006),
+         * 그리고 `ConnectException` · `UnknownHostException`. 하나라도 있으면 쉼을 건다.
+         * HikariCP(7.0.2)는 대기 초과 예외에 풀이 마지막으로 겪은 연결 실패를 원인으로 달고 그 SQL 상태를 옮겨 싣는다. 그 칸에는
+         * 새 연결 만들기의 실패만이 아니라 풀에서 꺼낸 연결의 검증 실패(DB 가 멈춘 순간의 08003 등)도 남고, 새 연결 만들기가
+         * 성공해야 지워진다.
+         * 걸리지 않는 경우(쉼 없이 요청마다 풀 대기 2초를 치른다): 풀 바닥(연결이 모두 쓰이는 중 — 앞선 실패가 지워져 있으면 원인도
+         * SQL 상태도 없다) · 패킷을 버리는 주소(대기 시간 안에 연결 실패가 나지 않아 원인이 비어 있다) · 틀린 비밀번호 28P01 ·
+         * 없는 데이터베이스 3D000 · 기동 중 57P03(부류가 08 이 아니다).
+         * 남는 틈: 연결 실패 직후 새 연결 만들기가 풀 대기 시간보다 오래 걸리는 동안에는 앞선 실패가 칸에 남아 있어, 그동안의
+         * 풀 바닥 대기 초과도 닿지 못함으로 읽혀 쉼이 걸릴 수 있다.
          */
         fun couldNotConnect(error: Throwable): Boolean =
             generateSequence(error) { current -> current.cause?.takeIf { it !== current } }.take(16).any { cause ->
