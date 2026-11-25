@@ -9,7 +9,16 @@ import xyz.junproject.backend.sync.usecase.HistoryState
  * 글 하나의 변경 목록은 요청 때 계산한다.
  */
 @Service
-class HistoryService(private val git: NoteSourcePort, private val requestLog: RequestLog) {
+class HistoryService(
+    private val git: NoteSourcePort,
+    private val requestLog: RequestLog,
+    /** 실패를 쥐는 시간을 재는 시계 — 테스트가 바꾼다 */
+    private val clock: java.time.Clock,
+    /** 쥔 것이 없을 때의 계산이 실패하면 그 실패를 이만큼 쥔다(그동안의 요청은 git 을 띄우지 않고 장애) */
+    private val failureHold: java.time.Duration,
+) {
+    @org.springframework.beans.factory.annotation.Autowired
+    constructor(git: NoteSourcePort, requestLog: RequestLog) : this(git, requestLog, java.time.Clock.systemUTC(), RECENT_FAILURE_HOLD)
 
     data class RecentChanges(val commitSha: String, val commits: List<CommitChanges>)
 
@@ -56,5 +65,7 @@ class HistoryService(private val git: NoteSourcePort, private val requestLog: Re
         const val DOCS_PER_COMMIT_LIMIT = 50
         /** 글 하나의 변경 목록에 싣는 수 */
         const val REVISION_LIMIT = 100
+        /** 첫 요청의 계산이 실패했을 때 그 실패를 쥐는 기본 시간 */
+        val RECENT_FAILURE_HOLD: java.time.Duration = java.time.Duration.ofSeconds(5)
     }
 }

@@ -214,4 +214,39 @@ class GitRepositoryChangesTest {
     fun `최근 변경에서 이력을 읽는 단계가 버텨도 상한 뒤 기다리지 않고 끊는다`() {
         assertStopsWithoutWaiting("log") { git -> git.recentChanges(30, 200, 50) }
     }
+
+    // ---- 글 하나의 이력은 요청 전체가 한 기한 ----
+    // 세 단계(커밋이 있는지 · 지금 판에 있는지 · 이력)가 요청 상한 하나를 나눠 쓴다 — 단계마다 상한을 새로 주지 않는다
+
+    /** 단계마다 [seconds] 초 걸린 뒤 답하는 가짜 git — `rev-parse` 는 판을, `ls-tree -z` 는 그 글의 한 줄을, `log` 는 빈 이력을 */
+    private fun slowEachStage(seconds: String): String =
+        "sleep $seconds\ncase \" \$* \" in\n" +
+            "  *\" rev-parse \"*) echo $headSha;;\n" +
+            "  *\" ls-tree \"*) printf '100644 blob %s\\t%s\\000' $headSha '$historyPath';;\n" +
+            "esac"
+
+    @Test
+    fun `글 하나의 이력은 단계마다 상한 안이어도 합이 요청 상한을 넘으면 그 상한에서 장애로 끝난다`() {
+        placeInWorkingTree(historyPath)
+        // 요청 상한 1초 · 단계마다 0.6초(상한의 0.6배) — 셋을 합하면 1.8초
+        val git = repository(slowEachStage("0.6"), requestTimeout = Duration.ofSeconds(1))
+        val started = System.nanoTime()
+        val failure = assertTimeoutPreemptively(Duration.ofSeconds(10), ThrowingSupplier {
+            assertThrows(Throwable::class.java) { git.documentHistory(historyPath, 100) }
+        })
+        val tookMillis = Duration.ofNanos(System.nanoTime() - started).toMillis()
+
+        assertTrue(failure is IllegalStateException && failure.message?.contains("timeout") == true, "요청 전체의 상한을 넘었는데 시간 초과의 장애가 아니다: $failure")
+        assertTrue(tookMillis < 1500, "요청 상한(1초)을 넘어서까지 돌았다: ${tookMillis}ms")
+    }
+
+    @Test
+    fun `글 하나의 이력은 단계의 합이 요청 상한 안이면 그대로 성공한다`() {
+        placeInWorkingTree(historyPath)
+        // 단계마다 0.15초 — 합 0.45초 < 1초
+        val git = repository(slowEachStage("0.15"), requestTimeout = Duration.ofSeconds(1))
+        val history = assertTimeoutPreemptively(Duration.ofSeconds(10), ThrowingSupplier { git.documentHistory(historyPath, 100) })
+        assertEquals(emptyList<Any>(), history.revisions)
+        assertEquals(0, history.moreRevisions)
+    }
 }

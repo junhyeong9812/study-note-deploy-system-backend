@@ -330,6 +330,60 @@ class GitRepositoryChangesRealGitTest {
         assertEquals(listOf("cs/*.md"), history.revisions.map { it.path })
     }
 
+    // ---- 제목에 든 0x1e(기록 구분 글자) ----
+    // 제목은 git 이 준 그대로 싣는다(0x1e 포함). 출력의 해석이 제목의 글자에 기대지 않는다 — 커밋이 빠지거나 가짜 커밋이 생기거나 글이 다른 커밋에 붙지 않는다.
+    // 제목 안에 40자 16진처럼 보이는 조각이 있어도 같다. NUL 은 git 이 커밋 메시지에 받지 않아 대상 밖이다.
+    private val separator = "\u001e"
+    private val shaLikeTail = "0123456789abcdef0123456789abcdef01234567"
+
+    @Test
+    fun `제목에 기록 구분 글자가 든 커밋도 최근 변경에서 빠지지 않고 제목이 통째로 실리며 앞뒤 커밋이 어긋나지 않는다`() {
+        val before = commit("before") { write("cs/before.md", "# before\n") }
+        val single = commit("one${separator}doc") { write("cs/single.md", "# single\n") }
+        val multiple = commit("two${separator}docs") {
+            write("cs/before.md", "# before\nedited\n")
+            write("cs/second.md", "# second\n")
+        }
+        val shaLike = commit("looks${separator}$shaLikeTail") {
+            write("cs/third.md", "# third\n")
+            write("cs/fourth.md", "# fourth\n")
+        }
+        val after = commit("after") { write("cs/after.md", "# after\n") }
+
+        val changes = recent()
+
+        assertTrue(changes.all { it.sha.matches(Regex("^[0-9a-f]{40}$")) }, "가짜 커밋이 생겼다: ${changes.map { it.sha }}")
+        assertEquals(listOf(after, shaLike, multiple, single, before), changes.map { it.sha })
+        assertEquals(listOf("after", "looks${separator}$shaLikeTail", "two${separator}docs", "one${separator}doc", "before"), changes.map { it.title })
+        assertEquals(listOf(ChangedDoc("cs/after.md", ChangeKind.ADDED)), changes[0].docs)
+        assertEquals(setOf(ChangedDoc("cs/third.md", ChangeKind.ADDED), ChangedDoc("cs/fourth.md", ChangeKind.ADDED)), changes[1].docs.toSet())
+        assertEquals(setOf(ChangedDoc("cs/before.md", ChangeKind.MODIFIED), ChangedDoc("cs/second.md", ChangeKind.ADDED)), changes[2].docs.toSet())
+        assertEquals(listOf(ChangedDoc("cs/single.md", ChangeKind.ADDED)), changes[3].docs)
+        assertEquals(listOf(ChangedDoc("cs/before.md", ChangeKind.ADDED)), changes[4].docs)
+        assertEquals(listOf(committedAt(after), committedAt(shaLike), committedAt(multiple), committedAt(single), committedAt(before)), changes.map { it.at })
+    }
+
+    @Test
+    fun `제목에 기록 구분 글자가 든 커밋도 글 하나의 변경 목록에서 빠지지 않고 앞뒤 판이 어긋나지 않는다`() {
+        val first = commit("create") { write("cs/note.md", "# note\n") }
+        val odd = commit("edit${separator}$shaLikeTail") {
+            write("cs/note.md", "# note\nedited\n")
+            write("cs/other.md", "# other\n")
+        }
+        val last = commit("edit again${separator}") { write("cs/note.md", "# note\nedited\nagain\n") }
+
+        val history = repository().documentHistory("cs/note.md", 100)
+
+        assertEquals(
+            listOf(
+                DocRevision(last, committedAt(last), "edit again$separator", "cs/note.md"),
+                DocRevision(odd, committedAt(odd), "edit${separator}$shaLikeTail", "cs/note.md"),
+                DocRevision(first, committedAt(first), "create", "cs/note.md"),
+            ),
+            history.revisions,
+        )
+    }
+
     // ---- 얕은 저장소: 이력 응답이 "다 갖고 있지 않다"를 싣는다 (H0 과 잇는 곳) ----
 
     @Test
