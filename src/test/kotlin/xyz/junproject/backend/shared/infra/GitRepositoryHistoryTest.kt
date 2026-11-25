@@ -224,4 +224,67 @@ class GitRepositoryHistoryTest {
         assertTrue(failure.message?.contains("Could not resolve host: github.com") == true, failure.message)
         assertFalse(calledLines().any { it.startsWith("reset") }, "받기가 실패했는데 reset 했다: ${calledLines()}")
     }
+
+    // 원격이 얕은 사본이면 깊게 받기가 0 으로 끝나도, 새로 받아도 저장소는 얕다(git 2.43 실측: 원격 깊이 50 · 로컬 10 → 깊게 받은 뒤 50 · 여전히 얕음).
+    // 얕은지는 git 을 더 띄우지 않고 git 이 얕은 저장소에 두는 `.git/shallow` 로 본다 — 명령의 열은 그대로다.
+    private val stillShallowWords = "아직 얕다"
+    private val shallowMarker by lazy { File(repoDir, ".git/shallow") }
+
+    @Test
+    fun `깊게 받기가 성공해도 얕은 표시가 남아 있으면 얕다와 아직 얕다는 글을 쥐고 명령은 다섯 그대로다`() {
+        val git = existingRepository(answers(shallowAnswersTrue))
+        shallowMarker.writeText("$sha\n")
+        assertEquals(sha, git.syncToRemoteHead())
+        assertEquals(
+            listOf(
+                "rev-parse --is-shallow-repository",
+                "fetch --unshallow origin main",
+                "fetch origin main",
+                "reset --hard origin/main",
+                "rev-parse HEAD",
+            ),
+            calledLines(),
+        )
+        val state = git.historyState()
+        assertEquals(true, state.shallow)
+        assertTrue(state.problem?.contains(stillShallowWords) == true, "아직 얕다는 글이 없다: ${state.problem}")
+        assertFalse(state.problem?.contains("git 실패") == true, "git 이 실패하지 않았는데 실패의 글이다: ${state.problem}")
+    }
+
+    @Test
+    fun `깊게 받기가 얕은 표시를 지우면 얕지 않고 실패도 없다`() {
+        val git = existingRepository(answers(
+            shallowAnswersTrue,
+            "  \"fetch --unshallow origin main\") rm -f '${File(repoDir, ".git/shallow").absolutePath}';;",
+        ))
+        shallowMarker.writeText("$sha\n")
+        assertEquals(sha, git.syncToRemoteHead())
+        assertEquals(5, calledLines().size, calledLines().toString())
+        assertEquals(HistoryState(shallow = false, problem = null), git.historyState())
+    }
+
+    @Test
+    fun `저장소의 git 폴더가 파일이어서 얕은 표시를 볼 수 없어도 동기화는 죽지 않고 깊게 받기의 성공대로 얕지 않다`() {
+        repoDir.mkdirs()
+        File(repoDir, ".git").writeText("gitdir: /elsewhere/worktrees/repo\n")
+        val git = GitRepository(repoDir, fakeGit(answers(shallowAnswersTrue)), requestTimeout = Duration.ofMillis(300), syncTimeout = Duration.ofSeconds(20))
+        assertEquals(sha, git.syncToRemoteHead())
+        assertEquals(5, calledLines().size, calledLines().toString())
+        assertEquals(HistoryState(shallow = false, problem = null), git.historyState())
+    }
+
+    @Test
+    fun `원격이 얕아 새로 받은 저장소에 얕은 표시가 있으면 얕다와 아직 얕다는 글을 쥔다`() {
+        repoDir.parentFile.mkdirs()
+        val git = GitRepository(
+            repoDir,
+            fakeGit(answers("  clone*) mkdir -p '${repoDir.absolutePath}/.git'; echo $sha > '${repoDir.absolutePath}/.git/shallow';;")),
+            requestTimeout = Duration.ofMillis(300),
+        )
+        assertEquals(sha, git.syncToRemoteHead())
+        assertEquals(listOf("clone $remote ${repoDir.absolutePath}", "rev-parse HEAD"), calledLines())
+        val state = git.historyState()
+        assertEquals(true, state.shallow)
+        assertTrue(state.problem?.contains(stillShallowWords) == true, "아직 얕다는 글이 없다: ${state.problem}")
+    }
 }

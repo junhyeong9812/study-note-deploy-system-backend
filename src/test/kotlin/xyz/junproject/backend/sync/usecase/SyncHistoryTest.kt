@@ -144,4 +144,20 @@ class SyncHistoryTest {
         assertTrue(logs.lines.any { it.startsWith("ERROR") && it.contains("sync failed") }, logs.lines.toString())
         verify(exactly = 0) { tree.rebuild(any(), any()) }
     }
+
+    @Test
+    fun `깊게 받기가 성공해도 아직 얕으면 동기화는 성공하고 로그와 상태에 아직 얕다가 보인다`() {
+        val service = service("  \"rev-parse --is-shallow-repository\") echo true;;")
+        // 원격이 얕은 사본이면 깊게 받기가 0 으로 끝나도 git 의 얕은 표시가 남는다 — 가짜 git 은 그것을 지우지 않는다
+        File(temp.toFile(), "repo/.git/shallow").writeText("$sha\n")
+        val result = syncAndWait(service)
+
+        assertEquals("ok", result["outcome"], result.toString())
+        verify { tree.rebuild(any(), sha) }
+        val warned = warningLines().filter { it.startsWith("WARN") && it.contains("아직 얕다") }
+        assertEquals(1, warned.size, "아직 얕다는 WARN 이 한 줄이 아니다: ${logs.lines}")
+        val history = history(service)
+        assertEquals(true, history["shallow"])
+        assertTrue((history["problem"] as? String)?.contains("아직 얕다") == true, history.toString())
+    }
 }
