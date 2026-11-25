@@ -137,7 +137,7 @@ class GitRepository(
     /** 요청 중의 읽기([requestTimeout] · 기다림 없이 끊음). 공개되는 글을 바꾸지 않은 커밋도 훑은 수([scanLimit])에는 든다 */
     override fun recentChanges(commitLimit: Int, scanLimit: Int, docLimit: Int): List<CommitChanges> {
         if (!hasCommits()) return emptyList()
-        val output = readHistory("log", "-z", "--no-merges", "-n", scanLimit.toString(), "-M", "--name-status", "--format=$HISTORY_FORMAT", "HEAD")
+        val output = readHistory(requestTimeout, "log", "-z", "--no-merges", "-n", scanLimit.toString(), "-M", "--name-status", "--format=$HISTORY_FORMAT", "HEAD")
         return parseHistory(output).mapNotNull { entry ->
             val docs = entry.changes.mapNotNull { change -> publicChange(change) }
             if (docs.isEmpty()) null
@@ -146,14 +146,21 @@ class GitRepository(
     }
 
     /**
-     * 요청 중의 읽기([requestTimeout] · 기다림 없이 끊음). 존재 확인부터 log 까지 한 자리를 쥐고, 자리가 없으면 기다리지 않고 장애.
-     * 사용자 경로는 늘 `--` 뒤에 두고 pathspec 마법을 끈다(`--literal-pathspecs`)
+     * 요청 중의 읽기 — 존재 확인부터 log 까지 요청 전체가 [requestTimeout] 하나를 나눠 쓰고(기다림 없이 끊음), 한 자리를 쥔다.
+     * 자리가 없으면 기다리지 않고 장애. 사용자 경로는 늘 `--` 뒤에 두고 pathspec 마법을 끈다(`--literal-pathspecs`)
      */
     override fun documentHistory(path: String, limit: Int): DocHistory {
         if (!historyReads.tryAcquire()) error("이력 읽기가 함께 ${historyReadConcurrency}개를 넘었다")
         try {
-            if (!hasCommits() || !existsAtHead(path)) throw FileNotFoundException(path)
-            val output = readHistory("log", "-z", "--no-merges", "--follow", "-M", "--name-status", "--format=$HISTORY_FORMAT", "HEAD", "--", path)
+            val deadline = System.nanoTime() + requestTimeout.toNanos()
+            /** 기한까지 남은 시간 — 다 됐으면 시간 초과의 장애 */
+            fun remaining(): Duration {
+                val left = deadline - System.nanoTime()
+                if (left <= 0) error("git timeout(${requestTimeout.toMillis()}ms): 글 하나의 이력 $path")
+                return Duration.ofNanos(left)
+            }
+            if (!hasCommits(remaining()) || !existsAtHead(path, remaining())) throw FileNotFoundException(path)
+            val output = readHistory(remaining(), "log", "-z", "--no-merges", "--follow", "-M", "--name-status", "--format=$HISTORY_FORMAT", "HEAD", "--", path)
             val revisions = parseHistory(output).mapNotNull { entry ->
                 // 그 판에서의 경로 = name-status 의 마지막 칸(옮겨졌으면 새 경로)
                 val pathThen = entry.changes.lastOrNull()?.path ?: return@mapNotNull null
@@ -166,23 +173,23 @@ class GitRepository(
     }
 
     /** 커밋이 하나라도 있는가 — `rev-parse --verify -q` 가 1 이고 아무것도 내지 않을 때만 빈 저장소. 그 밖의 실패는 장애 */
-    private fun hasCommits(): Boolean {
+    private fun hasCommits(timeout: Duration = requestTimeout): Boolean {
         val arguments = arrayOf("rev-parse", "--verify", "-q", "HEAD^{commit}")
-        val (exitCode, output) = execute(arguments, repoDir, requestTimeout, Duration.ZERO)
+        val (exitCode, output) = execute(arguments, repoDir, timeout, Duration.ZERO)
         if (exitCode == 0) return true
         if (exitCode == 1 && output.isBlank()) return false
         error("git 실패(${arguments.joinToString(" ")}): ${output.take(300)}")
     }
 
     /** 지금 판(HEAD)에 [path] 라는 파일이 있는가 — 폴더는 아니다 */
-    private fun existsAtHead(path: String): Boolean =
-        readHistory("ls-tree", "-z", "HEAD", "--", path).split('\u0000').any { entry ->
+    private fun existsAtHead(path: String, timeout: Duration): Boolean =
+        readHistory(timeout, "ls-tree", "-z", "HEAD", "--", path).split('\u0000').any { entry ->
             entry.substringAfter('\t', "") == path && entry.substringBefore('\t').split(' ').getOrNull(1) == "blob"
         }
 
-    /** 이력 읽기의 git — pathspec 마법을 끄고, 요청 상한에서 기다림 없이 끊는다 */
-    private fun readHistory(vararg arguments: String): String =
-        run("--literal-pathspecs", *arguments, timeout = requestTimeout, grace = Duration.ZERO)
+    /** 이력 읽기의 git — pathspec 마법을 끄고, [timeout] 에서 기다림 없이 끊는다 */
+    private fun readHistory(timeout: Duration, vararg arguments: String): String =
+        run("--literal-pathspecs", *arguments, timeout = timeout, grace = Duration.ZERO)
 
     /** 바뀐 파일 하나를 공개되는 글의 변경으로 — 숨김 경계를 넘는 옮김은 더해짐 · 지워짐. 공개되는 글이 아니면 null */
     private fun publicChange(change: NameStatus): ChangedDoc? {
@@ -312,28 +319,48 @@ class GitRepository(
 
         private class HistoryEntry(val sha: String, val at: String, val title: String, val changes: List<NameStatus>)
 
+        /** 커밋의 머리 토큰 — 기록 구분 문자(0x1e) 뒤의 sha */
+        private val COMMIT_HEAD = Regex("^\u001e([0-9a-f]{40})$")
+        /** name-status 의 상태 토큰 — A · M · D · T · R100 · C075 … */
+        private val CHANGE_STATUS = Regex("^[A-Z][0-9]*$")
+
         /**
          * `log -z --name-status --format=[HISTORY_FORMAT]` 의 출력 — 커밋마다 `0x1e sha NUL 시각 NUL 제목 NUL`, 바뀐 파일이 있으면
-         * 줄바꿈 하나 뒤에 `상태 NUL 경로 NUL`(옮김 · 복사는 `상태 NUL 옛 경로 NUL 새 경로 NUL`). 경로는 따옴표로 감싸지지 않는다
+         * 줄바꿈 하나 뒤에 `상태 NUL 경로 NUL`(옮김 · 복사는 `상태 NUL 옛 경로 NUL 새 경로 NUL`). 경로는 따옴표로 감싸지지 않는다.
+         * NUL 로 나눈 토큰을 차례로 읽는다 — 머리 · 시각 · 제목 · 경로는 자리로 읽고(제목의 글자에 기대지 않는다), 그 밖의 토큰은
+         * 상태 꼴이거나 다음 커밋의 머리여야 한다. 둘 다 아니면 조용히 건너뛰지 않고 장애(IllegalStateException)
          */
-        private fun parseHistory(output: String): List<HistoryEntry> =
-            output.split('\u001e').filter { record -> record.isNotEmpty() }.map { record ->
-                val fields = record.split('\u0000')
+        private fun parseHistory(output: String): List<HistoryEntry> {
+            val tokens = output.split('\u0000')
+            val entries = mutableListOf<HistoryEntry>()
+            var index = 0
+            fun tokenAt(position: Int): String =
+                tokens.getOrNull(position) ?: error("이력 출력이 중간에 끊겼다(토큰 $position)")
+            while (index < tokens.size) {
+                val head = tokens[index].trimStart('\n')
+                if (head.isEmpty()) { index++; continue }
+                val sha = COMMIT_HEAD.matchEntire(head)?.groupValues?.get(1)
+                    ?: error("이력 출력의 커밋 머리를 읽지 못했다: ${head.take(80)}")
+                val at = tokenAt(index + 1)
+                val title = tokenAt(index + 2)
+                index += 3
                 val changes = mutableListOf<NameStatus>()
-                var index = 3
-                while (index < fields.size) {
-                    val status = fields[index].trimStart('\n')
+                while (index < tokens.size) {
+                    val status = tokens[index].trimStart('\n')
                     if (status.isEmpty()) { index++; continue }
+                    if (!CHANGE_STATUS.matches(status)) break
                     if (status[0] == 'R' || status[0] == 'C') {
-                        changes += NameStatus(status[0], fields[index + 2], oldPath = fields[index + 1])
+                        changes += NameStatus(status[0], tokenAt(index + 2), oldPath = tokenAt(index + 1))
                         index += 3
                     } else {
-                        changes += NameStatus(status[0], fields[index + 1], oldPath = null)
+                        changes += NameStatus(status[0], tokenAt(index + 1), oldPath = null)
                         index += 2
                     }
                 }
-                HistoryEntry(sha = fields[0], at = fields.getOrElse(1) { "" }, title = fields.getOrElse(2) { "" }, changes = changes)
+                entries += HistoryEntry(sha, at, title, changes)
             }
+            return entries
+        }
 
         /** --name-status 출력 파싱 (순수 함수 — 테스트 이음새, B9). R은 D(구)+A(신)로 분해 */
         fun parseNameStatus(output: String): List<Pair<Char, String>> =
