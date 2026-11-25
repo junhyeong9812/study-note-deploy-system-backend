@@ -6,7 +6,6 @@ import xyz.junproject.backend.content.domain.PathGuard
 import xyz.junproject.backend.content.usecase.ChangeKind
 import xyz.junproject.backend.content.usecase.ChangedDoc
 import xyz.junproject.backend.content.usecase.CommitChanges
-import xyz.junproject.backend.content.usecase.CommitInfo
 import xyz.junproject.backend.content.usecase.DocHistory
 import xyz.junproject.backend.content.usecase.DocRevision
 import xyz.junproject.backend.content.usecase.NoteSourcePort
@@ -201,13 +200,6 @@ class GitRepository(
             else -> if (newPublic) ChangedDoc(change.path, ChangeKind.MODIFIED) else null
         }
     }
-
-    override fun recentCommits(limit: Int): List<CommitInfo> =
-        run("log", "--pretty=%H%x09%cI%x09%s", "-n", limit.toString())
-            .lines().filter { it.isNotBlank() }.map { line ->
-                val parts = line.split("\t", limit = 3)
-                CommitInfo(sha = parts[0], at = parts.getOrElse(1) { "" }, message = parts.getOrElse(2) { "" })
-            }
 
     /**
      * 그 판의 그 파일(요청 중의 읽기 — [requestTimeout]). git 이 "그 판에 그 파일이 없다 · 그 판이 없다"고 답한 경우만

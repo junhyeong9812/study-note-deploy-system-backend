@@ -169,4 +169,49 @@ class GitRepositoryChangesTest {
         assertTrue(busy.all { (failure, _) -> failure is IllegalStateException }, "넘친 요청의 실패가 장애(IllegalStateException)가 아니다: $busy")
         assertTrue(busy.all { (_, tookMillis) -> tookMillis < 500 }, "넘친 요청이 기다렸다: $busy")
     }
+
+    // 이력 읽기는 여러 번 git 을 띄운다(커밋이 있는지 · 지금 판에 있는지 · 이력). 어느 단계에서 상한을 넘어도 기다림 없이 끊는다 —
+    // 앞 단계는 곧바로 답하고 [stuckAt] 단계에서만 종료 신호를 무시하고 버티는 가짜 git 으로 단계마다 본다
+    private val historyPath = "cs/a/2-summary.md"
+    private val headSha = "c".repeat(40)
+
+    /** `rev-parse` 는 판을, `ls-tree -z` 는 그 글의 한 줄을 곧바로 답하고, 인자에 [stuckAt] 이 든 호출만 TERM 을 무시하고 버틴다 */
+    private fun stuckOnly(stuckAt: String): String =
+        "case \" \$* \" in\n" +
+            "  *\" $stuckAt \"*) echo \$\$ > '${gitPidFile.absolutePath}'; trap '' TERM; while :; do sleep 0.1; done;;\n" +
+            "  *\" rev-parse \"*) echo $headSha;;\n" +
+            "  *\" ls-tree \"*) printf '100644 blob %s\\t%s\\000' $headSha '$historyPath';;\n" +
+            "esac"
+
+    private fun assertStopsWithoutWaiting(stuckAt: String, read: (GitRepository) -> Unit) {
+        placeInWorkingTree(historyPath)
+        gitPidFile.delete()
+        argumentLog.delete()
+        val git = repository(stuckOnly(stuckAt), requestTimeout = Duration.ofMillis(300))
+        val started = System.nanoTime()
+        val failure = assertTimeoutPreemptively(Duration.ofSeconds(15), ThrowingSupplier { assertThrows(Throwable::class.java) { read(git) } })
+        val tookMillis = Duration.ofNanos(System.nanoTime() - started).toMillis()
+
+        assertTrue(gitPidFile.exists(), "준비: '$stuckAt' 단계까지 가지 않았다 — 앞 단계에서 끝났다: ${invocations()} · $failure")
+        assertTrue(failure is IllegalStateException && failure.message?.contains("timeout") == true, "'$stuckAt' 단계의 시간 초과가 장애가 아니다: $failure")
+        // 요청 상한(0.3초) 둘까지(앞 단계는 곧바로 끝난다) + 1초 — 종료 신호 뒤에 기다림(5초)이 붙으면 넘는다
+        assertTrue(tookMillis < 1600, "'$stuckAt' 단계에서 상한 뒤에 기다렸다: ${tookMillis}ms")
+        Thread.sleep(200)
+        assertFalse(isRunning(gitPidFile.readText().trim().toLong()), "'$stuckAt' 단계의 가짜 git 이 남았다")
+    }
+
+    @Test
+    fun `글 하나의 이력에서 지금 판에 있는지 묻는 단계가 버텨도 상한 뒤 기다리지 않고 끊는다`() {
+        assertStopsWithoutWaiting("ls-tree") { git -> git.documentHistory(historyPath, 100) }
+    }
+
+    @Test
+    fun `글 하나의 이력에서 이력을 읽는 단계가 버텨도 상한 뒤 기다리지 않고 끊는다`() {
+        assertStopsWithoutWaiting("log") { git -> git.documentHistory(historyPath, 100) }
+    }
+
+    @Test
+    fun `최근 변경에서 이력을 읽는 단계가 버텨도 상한 뒤 기다리지 않고 끊는다`() {
+        assertStopsWithoutWaiting("log") { git -> git.recentChanges(30, 200, 50) }
+    }
 }

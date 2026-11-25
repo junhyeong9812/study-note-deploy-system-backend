@@ -230,6 +230,37 @@ class HistoryControllerTest {
         verify(exactly = 1) { history.documentHistory(any(), "--output=x.md") }
     }
 
+    /**
+     * pathspec 마법처럼 보이는 경로를 경로 검증이 어디서 거르는가 — 422 는 git 까지 가지 않고, 나머지는 글자 그대로 넘긴다
+     * (마법을 끄는 것은 git 을 부르는 쪽의 일이다 — GitRepositoryChangesRealGitTest).
+     */
+    @Test
+    fun `pathspec 마법처럼 보이는 경로 가운데 형식이 틀린 것만 422 이고 나머지는 글자 그대로 넘긴다`() {
+        every { history.historyState() } returns HistoryState(shallow = false, problem = null)
+        every { history.documentHistory(any(), any()) } throws FileNotFoundException("missing")
+        val expected = linkedMapOf(
+            "cs/*.md" to 404,
+            "cs/?ne.md" to 404,
+            "cs/[o]ne.md" to 404,
+            ":(glob)cs/*.md" to 404,
+            ":(top)cs/one.md" to 404,
+            ":/cs/one.md" to 404,
+            ":(icase)CS/ONE.md" to 404,
+            ":(exclude)cs/one.md" to 404,
+            ":(glob)cs/**" to 422,
+            ":(top)/cs/one.md" to 404,
+            "/cs/one.md" to 422,
+            ":(top)../cs/one.md" to 404,
+            "cs/../cs/one.md" to 422,
+        )
+        expected.forEach { (path, status) ->
+            val response = requestDoc(path)
+            assertEquals(status, response.status, "경로($path): ${response.contentAsString}")
+            if (status == 422) verify(exactly = 0) { history.documentHistory(any(), path) }
+            else verify(exactly = 1) { history.documentHistory(any(), path) }
+        }
+    }
+
     @Test
     fun `경로가 없으면 422 invalid_request 다`() {
         val response = mockMvc.perform(get("/api/history/doc")).andReturn().response

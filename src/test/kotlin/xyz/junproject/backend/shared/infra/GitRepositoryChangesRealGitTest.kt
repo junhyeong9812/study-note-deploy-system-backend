@@ -300,6 +300,36 @@ class GitRepositoryChangesRealGitTest {
         assertFalse(outputTarget.exists(), "경로가 --output 옵션으로 읽혀 파일이 생겼다")
     }
 
+    // pathspec 의 마법(`*` · `?` · `[...]` 의 글로브, `:(top)` · `:/` · `:(glob)` · `:(icase)`)은 꺼져 있다 — 경로는 글자 그대로의 파일 하나만 가리킨다
+    private val pathspecMagic = listOf("cs/*.md", "cs/?ne.md", "cs/[o]ne.md", ":(glob)cs/*.md", ":(top)cs/one.md", ":/cs/one.md", ":(icase)CS/ONE.md")
+
+    @Test
+    fun `글자 그대로의 파일이 없으면 pathspec 마법을 쓴 경로는 다른 글의 판을 하나도 돌려주지 않고 없음이다`() {
+        commit("add one") { write("cs/one.md", "# one\n") }
+        commit("add two") { write("cs/two.md", "# two\n") }
+        commit("edit one") { write("cs/one.md", "# one\nmore\n") }
+
+        pathspecMagic.forEach { path ->
+            val outcome = try { repository().documentHistory(path, 100) } catch (error: Exception) { error }
+            assertTrue(outcome is FileNotFoundException, "pathspec 마법이 켜져 있다 — '$path' 가 없음이 아니다: $outcome")
+        }
+    }
+
+    @Test
+    fun `글자 그대로 별표가 든 파일이 있으면 그 파일의 커밋만 돌려준다`() {
+        val literal = commit("add literal star") {
+            write("cs/one.md", "# one\n")
+            write("cs/*.md", "# literally a star\n")
+        }
+        commit("add two") { write("cs/two.md", "# two\n") }
+        commit("edit one") { write("cs/one.md", "# one\nmore\n") }
+
+        val history = repository().documentHistory("cs/*.md", 100)
+
+        assertEquals(listOf(literal), history.revisions.map { it.sha }, "글로브가 다른 글의 판을 끌어왔다: $history")
+        assertEquals(listOf("cs/*.md"), history.revisions.map { it.path })
+    }
+
     // ---- 얕은 저장소: 이력 응답이 "다 갖고 있지 않다"를 싣는다 (H0 과 잇는 곳) ----
 
     @Test

@@ -2,9 +2,6 @@ package xyz.junproject.backend.content.usecase
 
 import xyz.junproject.backend.sync.usecase.HistoryState
 
-/** content가 필요로 하는 노트 소스 능력 — 구현은 shared/infra/GitRepository (DIP) */
-data class CommitInfo(val sha: String, val message: String, val at: String)
-
 /** 커밋 하나가 바꾼 글 하나의 구분 — 응답에는 소문자 이름(added · modified · deleted · renamed)으로 나간다 */
 enum class ChangeKind { ADDED, MODIFIED, DELETED, RENAMED }
 
@@ -20,11 +17,11 @@ data class DocRevision(val sha: String, val at: String, val title: String, val p
 /** 글 하나의 변경 목록 — 새것부터. [moreRevisions] 는 상한을 넘어 뺀 수 */
 data class DocHistory(val revisions: List<DocRevision>, val moreRevisions: Int)
 
+/** content가 필요로 하는 노트 소스 능력 — 구현은 shared/infra/GitRepository (DIP) */
 interface NoteSourcePort {
     fun allMarkdown(): List<String>
     fun currentHead(): String
     fun readFile(path: String): String
-    fun recentCommits(limit: Int): List<CommitInfo>
     fun readFileAt(sha: String, path: String): String   // 그 커밋 시점의 내용 (git show)
 
     /**
