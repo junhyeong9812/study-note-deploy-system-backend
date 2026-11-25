@@ -33,7 +33,7 @@ class GitRepository(
     private val terminationGrace: Duration = TERMINATION_GRACE,
 ) : SourceControlPort, NoteSourcePort, DocumentReader {
     @Autowired
-    constructor() : this(File(System.getenv("REPO_DIR") ?: "/data/study-note/repo"))
+    constructor() : this(File(System.getenv("REPO_DIR") ?: "/data/study-note/repo"), deepenTimeout = deepenTimeoutFromEnvironment())
 
     private val remote = System.getenv("STUDY_NOTE_REMOTE")
         ?: "https://github.com/junhyeong9812/study-note.git"
@@ -71,13 +71,23 @@ class GitRepository(
         return when (answer) {
             "false" -> HistoryState(shallow = false, problem = null)
             "true" -> try {
-                run("fetch", "--unshallow", "origin", "main")
+                run("fetch", "--unshallow", "origin", "main", timeout = deepenTimeout)
                 historyAfterReceiving()
             } catch (error: IllegalStateException) {
-                HistoryState(shallow = true, problem = error.message ?: error.toString())
+                HistoryState(shallow = true, problem = withLeftLock(error.message ?: error.toString()))
             }
             else -> HistoryState(shallow = null, problem = "얕은지 알 수 없는 답(rev-parse --is-shallow-repository): ${answer.take(300)}")
         }
+    }
+
+    /**
+     * 깊게 받기가 실패한 뒤 `.git/shallow.lock` 이 남아 있으면 그것을 글의 앞머리에 둔다(WARN 은 앞 300자만 싣는다).
+     * 잠금은 지우지 않는다 — 같은 볼륨을 쓰는 다른 자리의 git 이 쥔 잠금일 수 있다
+     */
+    private fun withLeftLock(gitProblem: String): String {
+        val lockFile = File(repoDir, ".git/shallow.lock")
+        if (!lockFile.exists()) return gitProblem
+        return "잠금 파일이 남아 있다(${lockFile.absolutePath}) — 다른 git 이 돌고 있지 않은지 확인한 뒤 지운다. $gitProblem"
     }
 
     /**
@@ -111,7 +121,7 @@ class GitRepository(
     override fun readFile(path: String): String = File(repoDir, path).readText()
 
     /** 요청 중의 읽기 — [requestTimeout] 안에 끝나지 않으면 장애(IllegalStateException) */
-    override fun currentHead(): String = run("rev-parse", "HEAD", timeout = requestTimeout).trim()
+    override fun currentHead(): String = run("rev-parse", "HEAD", timeout = requestTimeout, grace = Duration.ZERO).trim()
 
     override fun recentCommits(limit: Int): List<CommitInfo> =
         run("log", "--pretty=%H%x09%cI%x09%s", "-n", limit.toString())
@@ -125,20 +135,23 @@ class GitRepository(
      * FileNotFoundException(없음 — 문서 주소는 404), 그 밖의 실패(시간 초과 · 저장소가 아님 · 깨진 객체)는 IllegalStateException(장애)
      */
     override fun readFileAt(sha: String, path: String): String {
-        val (exitCode, output) = execute(arrayOf("-c", "core.quotepath=off", "show", "$sha:$path"), repoDir, requestTimeout)
+        val (exitCode, output) = execute(arrayOf("-c", "core.quotepath=off", "show", "$sha:$path"), repoDir, requestTimeout, Duration.ZERO)
         if (exitCode == 0) return output
         if (NOT_FOUND_ANSWERS.any { answer -> answer.containsMatchIn(output) }) throw java.io.FileNotFoundException("$sha:$path")
         error("git 실패(show $sha:$path): ${output.take(300)}")
     }
 
-    private fun run(vararg arguments: String, workDir: File = repoDir, timeout: Duration = syncTimeout): String {
-        val (exitCode, output) = execute(arguments, workDir, timeout)
+    private fun run(vararg arguments: String, workDir: File = repoDir, timeout: Duration = syncTimeout, grace: Duration = terminationGrace): String {
+        val (exitCode, output) = execute(arguments, workDir, timeout, grace)
         check(exitCode == 0) { "git 실패(${arguments.joinToString(" ")}): ${output.take(300)}" }
         return output
     }
 
-    /** git 을 돌려 (종료 코드, 표준 출력 + 표준 오류)를 돌려준다. [timeout] 을 넘으면 그 프로세스와 그 아래 프로세스를 끊고 IllegalStateException */
-    private fun execute(arguments: Array<out String>, workDir: File, timeout: Duration): Pair<Int, String> {
+    /**
+     * git 을 돌려 (종료 코드, 표준 출력 + 표준 오류)를 돌려준다. [timeout] 을 넘으면 그 프로세스와 그 아래 프로세스를 [stop] 으로 끝내고
+     * IllegalStateException. [grace] 가 0 이면(요청 중의 읽기) 기다리지 않고 곧바로 강제로 끊는다
+     */
+    private fun execute(arguments: Array<out String>, workDir: File, timeout: Duration, grace: Duration): Pair<Int, String> {
         val builder = ProcessBuilder(gitCommand, *arguments).directory(workDir).redirectErrorStream(true)
         // git 의 답을 영어로 고정한다 — "없음"을 그 문구로 가른다(로케일이 한국어면 문구가 바뀐다)
         builder.environment()["LC_ALL"] = "C"
@@ -148,9 +161,8 @@ class GitRepository(
         val reader = Thread { process.inputStream.bufferedReader().forEachLine { outputBuffer.appendLine(it) } }
         reader.start()
         if (!process.waitFor(timeout.toMillis(), TimeUnit.MILLISECONDS)) {
-            // 아래 프로세스가 출력을 쥐고 있으면 읽기 스레드가 풀리지 않는다 — 함께 끊는다
-            process.descendants().forEach { descendant -> descendant.destroyForcibly() }
-            process.destroyForcibly()
+            // 아래 프로세스가 출력을 쥐고 있으면 읽기 스레드가 풀리지 않는다 — 함께 끝낸다
+            stop(process, grace)
             reader.join(2000)
             error("git timeout(${timeout.toMillis()}ms): ${arguments.joinToString(" ")}")
         }
@@ -158,7 +170,33 @@ class GitRepository(
         return process.exitValue() to outputBuffer.toString()
     }
 
+    /**
+     * 시간 초과한 git 과 그 아래 프로세스를 끝낸다 — 먼저 종료 신호(SIGTERM)를 보내 git 이 잠금(`.git/shallow.lock` 등)을 스스로 지우게 하고,
+     * [grace] 안에 끝나지 않은 것만 강제로 끊는다. 아래 프로세스의 목록은 신호 전에 잡는다(git 이 먼저 끝나면 목록에서 사라진다)
+     */
+    private fun stop(process: Process, grace: Duration) {
+        val processes = process.descendants().toList() + process.toHandle()
+        if (!grace.isZero) {
+            processes.forEach { handle -> handle.destroy() }
+            val deadline = System.nanoTime() + grace.toNanos()
+            while (processes.any { handle -> isRunning(handle) } && System.nanoTime() < deadline) Thread.sleep(50)
+        }
+        processes.filter { handle -> isRunning(handle) }.forEach { handle -> handle.destroyForcibly() }
+    }
+
+    /**
+     * 아직 도는가 — 거둬지지 않은 좀비(`/proc/<pid>/stat` 의 상태 Z)는 끝난 것으로 본다. 컨테이너의 PID 1 이 java 면
+     * git 이 끝난 뒤 고아가 된 아래 프로세스가 거둬지지 않아 [ProcessHandle.isAlive] 가 참으로 남는다. `/proc` 이 없으면 isAlive 그대로
+     */
+    private fun isRunning(handle: ProcessHandle): Boolean {
+        if (!handle.isAlive) return false
+        val stat = try { File("/proc/${handle.pid()}/stat").readText() } catch (_: Exception) { return handle.isAlive }
+        return stat.substringAfterLast(")").trim().firstOrNull() != 'Z'
+    }
+
     companion object {
+        private val logger = org.slf4j.LoggerFactory.getLogger(GitRepository::class.java)
+
         /** 요청 중의 git 읽기의 기본 시간 제한(명세 23) */
         val REQUEST_TIMEOUT: Duration = Duration.ofSeconds(5)
         /** 내용 동기화 · 목록 명령의 기본 시간 제한(명령마다 — 첫 깊게 받기도 이 안에 든다) */
@@ -167,6 +205,19 @@ class GitRepository(
         val DEEPEN_TIMEOUT: Duration = Duration.ofSeconds(300)
         /** 종료 신호 뒤 강제로 끊기 전까지의 기본 기다림 */
         val TERMINATION_GRACE: Duration = Duration.ofSeconds(5)
+        /** 깊게 받기의 시간 제한(초)을 바꾸는 환경 변수 */
+        private const val DEEPEN_TIMEOUT_VARIABLE = "STUDY_NOTE_DEEPEN_TIMEOUT_SECONDS"
+
+        /** [DEEPEN_TIMEOUT_VARIABLE] 의 값 — 없으면 기본값, 양의 정수가 아니면 기본값을 쓰고 WARN 한 줄(뜨는 것을 막지 않는다) */
+        private fun deepenTimeoutFromEnvironment(): Duration {
+            val value = System.getenv(DEEPEN_TIMEOUT_VARIABLE) ?: return DEEPEN_TIMEOUT
+            val seconds = value.trim().toLongOrNull()
+            if (seconds == null || seconds <= 0) {
+                logger.warn("$DEEPEN_TIMEOUT_VARIABLE='$value' 은 양의 정수가 아니다 — 기본 ${DEEPEN_TIMEOUT.seconds}초를 쓴다")
+                return DEEPEN_TIMEOUT
+            }
+            return Duration.ofSeconds(seconds)
+        }
         /** 받기가 성공했는데 얕은 표시가 남은 때의 problem — 다음 동기화에서 다시 깊게 받기를 시도한다 */
         private const val STILL_SHALLOW = "받기는 끝났으나 저장소가 아직 얕다(.git/shallow 가 남음 — 원격이 얕은 사본일 수 있다). 다음 동기화에서 다시 깊게 받는다"
 
