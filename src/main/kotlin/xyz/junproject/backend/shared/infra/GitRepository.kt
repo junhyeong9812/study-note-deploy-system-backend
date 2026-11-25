@@ -23,7 +23,7 @@ class GitRepository(
     private val repoDir: File,
     /** git 실행 파일 — 테스트가 가짜 git 으로 바꾼다 */
     private val gitCommand: String = "git",
-    /** 요청 중의 읽기(readFileAt · currentHead)의 시간 제한(명세 23 — 기본 5초). 내용 동기화 · 목록 명령은 [SYNC_TIMEOUT] */
+    /** 요청 중의 읽기(readFileAt · currentHead)의 시간 제한(명세 23 — 기본 5초). 내용 동기화 · 목록 명령은 [syncTimeout] */
     private val requestTimeout: Duration = REQUEST_TIMEOUT,
     /** 내용 동기화 · 목록 명령의 시간 제한(명령마다) — 테스트가 짧게 바꾼다 */
     private val syncTimeout: Duration = SYNC_TIMEOUT,
@@ -34,18 +34,47 @@ class GitRepository(
     private val remote = System.getenv("STUDY_NOTE_REMOTE")
         ?: "https://github.com/junhyeong9812/study-note.git"
 
+    /** 마지막 동기화가 알아낸 이력의 상태 — 요청 스레드들이 읽는다. 값 하나를 통째로 바꿔 끼운다 */
+    @Volatile private var history: HistoryState = HistoryState.UNKNOWN
+
+    /**
+     * 내용 저장소를 전체 이력으로 받는다 — `--depth` 로 받지 않는다(깊은 저장소에 `fetch --depth` 를 돌리면 다시 얕아진다).
+     * 이미 있는 저장소가 얕으면 평소의 받기 전에 한 번 깊게 받는다. 깊게 받기 · 얕은지 묻기의 실패는 [history] 에 쥐고
+     * 평소의 동기화를 계속한다(다음 동기화에서 다시 시도). 평소의 받기 · reset 의 실패는 그대로 던진다.
+     */
     override fun syncToRemoteHead(): String {
         if (!File(repoDir, ".git").exists()) {
             repoDir.parentFile.mkdirs()
-            run("clone", "--depth=50", remote, repoDir.absolutePath, workDir = repoDir.parentFile)
+            run("clone", remote, repoDir.absolutePath, workDir = repoDir.parentFile)
+            history = HistoryState(shallow = false, problem = null)
         } else {
-            run("fetch", "--depth=50", "origin", "main")
+            history = deepenIfShallow()
+            run("fetch", "origin", "main")
             run("reset", "--hard", "origin/main")
         }
         return run("rev-parse", "HEAD").trim()
     }
 
-    override fun historyState(): HistoryState = TODO("H0 — 구현 전 뼈대")
+    override fun historyState(): HistoryState = history
+
+    /** 얕은지 묻고, 얕으면 깊게 받는다. 실패 · 시간 초과 · 참도 거짓도 아닌 답은 던지지 않고 그 문구를 problem 으로 돌려준다 */
+    private fun deepenIfShallow(): HistoryState {
+        val answer = try {
+            run("rev-parse", "--is-shallow-repository").trim()
+        } catch (error: IllegalStateException) {
+            return HistoryState(shallow = null, problem = error.message ?: error.toString())
+        }
+        return when (answer) {
+            "false" -> HistoryState(shallow = false, problem = null)
+            "true" -> try {
+                run("fetch", "--unshallow", "origin", "main")
+                HistoryState(shallow = false, problem = null)
+            } catch (error: IllegalStateException) {
+                HistoryState(shallow = true, problem = error.message ?: error.toString())
+            }
+            else -> HistoryState(shallow = null, problem = "얕은지 알 수 없는 답(rev-parse --is-shallow-repository): ${answer.take(300)}")
+        }
+    }
 
     /** prev..HEAD의 md 변경 목록. shallow 경계 밖 prev면 ShaUnresolvable → 호출부가 full로 강등 (B7) */
     override fun changedMarkdown(prevSha: String, headSha: String): List<Pair<Char, String>> {
@@ -90,7 +119,7 @@ class GitRepository(
         error("git 실패(show $sha:$path): ${output.take(300)}")
     }
 
-    private fun run(vararg arguments: String, workDir: File = repoDir, timeout: Duration = SYNC_TIMEOUT): String {
+    private fun run(vararg arguments: String, workDir: File = repoDir, timeout: Duration = syncTimeout): String {
         val (exitCode, output) = execute(arguments, workDir, timeout)
         check(exitCode == 0) { "git 실패(${arguments.joinToString(" ")}): ${output.take(300)}" }
         return output
@@ -120,7 +149,7 @@ class GitRepository(
     companion object {
         /** 요청 중의 git 읽기의 기본 시간 제한(명세 23) */
         val REQUEST_TIMEOUT: Duration = Duration.ofSeconds(5)
-        /** 내용 동기화 · 목록 명령의 시간 제한 */
+        /** 내용 동기화 · 목록 명령의 기본 시간 제한(명령마다 — 첫 깊게 받기도 이 안에 든다) */
         private val SYNC_TIMEOUT: Duration = Duration.ofSeconds(120)
 
         /** `git show <판>:<경로>` 의 "없음" 답(C 로케일) — 그 판에 그 파일이 없음 · 작업 트리에만 있음 · 그 판이 없음 */

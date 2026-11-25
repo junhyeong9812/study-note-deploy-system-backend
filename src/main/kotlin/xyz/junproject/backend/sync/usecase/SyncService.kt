@@ -54,6 +54,7 @@ class SyncService(
         "progress" to progress,
         "last_processed_sha" to readLastSha(),
         "last_result" to lastResult,
+        "history" to git.historyState().let { history -> mapOf("shallow" to history.shallow, "problem" to history.problem) },
     )
 
     private fun runPipeline(requestId: String, prevSha: String?, full: Boolean = false) {
@@ -62,6 +63,11 @@ class SyncService(
         progress = null
         try {
             val headSha = git.syncToRemoteHead()
+            // 전체 이력으로 바꾸지 못해도 글은 바뀐다 — 실패는 이 동기화의 요청 ID 로 드러낸다
+            val history = git.historyState()
+            if (history.problem != null) {
+                requestLog.log(requestId, "sync history: shallow=${history.shallow} problem=${history.problem.take(300)}", "warning")
+            }
             // 요청 SHA(멱등 키)는 유지하고, 원격 HEAD가 다르면 기록만 (B13 — Actions 경합 관찰용)
             if (inFlightSha.get() != headSha && inFlightSha.get() != "unknown") {
                 requestLog.log(requestId, "sync note: requested=${inFlightSha.get()} head=$headSha")
