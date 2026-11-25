@@ -160,4 +160,23 @@ class SyncHistoryTest {
         assertEquals(true, history["shallow"])
         assertTrue((history["problem"] as? String)?.contains("아직 얕다") == true, history.toString())
     }
+
+    @Test
+    fun `잠금 파일이 남아 깊게 받기가 실패해도 동기화는 성공하고 잠금이 남았다는 것이 로그와 상태에 보이며 잠금은 그대로다`() {
+        val lockFile = File(temp.toFile(), "repo/.git/shallow.lock")
+        val service = service(
+            "  \"rev-parse --is-shallow-repository\") echo true;;",
+            "  \"fetch --unshallow origin main\") echo \"fatal: Unable to create '${lockFile.absolutePath}': File exists.\" >&2; exit 128;;",
+        )
+        lockFile.writeText("")
+        val result = syncAndWait(service)
+
+        assertEquals("ok", result["outcome"], result.toString())
+        verify { tree.rebuild(any(), sha) }
+        assertTrue(lockFile.exists(), "남은 잠금 파일을 지웠다")
+        assertTrue(warningLines().any { it.startsWith("WARN") && it.contains("잠금 파일이 남아 있다") }, "잠금이 남았다는 WARN 이 없다: ${logs.lines}")
+        val history = history(service)
+        assertEquals(true, history["shallow"])
+        assertTrue((history["problem"] as? String)?.contains("잠금 파일이 남아 있다") == true, history.toString())
+    }
 }

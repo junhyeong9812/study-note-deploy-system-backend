@@ -27,6 +27,10 @@ class GitRepository(
     private val requestTimeout: Duration = REQUEST_TIMEOUT,
     /** 내용 동기화 · 목록 명령의 시간 제한(명령마다) — 테스트가 짧게 바꾼다 */
     private val syncTimeout: Duration = SYNC_TIMEOUT,
+    /** 깊게 받기(`fetch --unshallow`)의 시간 제한 — 평소 명령의 [syncTimeout] 과 따로. 테스트가 짧게 바꾼다 */
+    private val deepenTimeout: Duration = DEEPEN_TIMEOUT,
+    /** 시간 초과 때 종료 신호를 보낸 뒤 강제로 끊기 전까지 기다리는 시간 — 테스트가 짧게 바꾼다 */
+    private val terminationGrace: Duration = TERMINATION_GRACE,
 ) : SourceControlPort, NoteSourcePort, DocumentReader {
     @Autowired
     constructor() : this(File(System.getenv("REPO_DIR") ?: "/data/study-note/repo"))
@@ -159,6 +163,10 @@ class GitRepository(
         val REQUEST_TIMEOUT: Duration = Duration.ofSeconds(5)
         /** 내용 동기화 · 목록 명령의 기본 시간 제한(명령마다 — 첫 깊게 받기도 이 안에 든다) */
         private val SYNC_TIMEOUT: Duration = Duration.ofSeconds(120)
+        /** 깊게 받기의 기본 시간 제한 */
+        val DEEPEN_TIMEOUT: Duration = Duration.ofSeconds(300)
+        /** 종료 신호 뒤 강제로 끊기 전까지의 기본 기다림 */
+        val TERMINATION_GRACE: Duration = Duration.ofSeconds(5)
         /** 받기가 성공했는데 얕은 표시가 남은 때의 problem — 다음 동기화에서 다시 깊게 받기를 시도한다 */
         private const val STILL_SHALLOW = "받기는 끝났으나 저장소가 아직 얕다(.git/shallow 가 남음 — 원격이 얕은 사본일 수 있다). 다음 동기화에서 다시 깊게 받는다"
 

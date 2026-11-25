@@ -43,9 +43,16 @@ class GitRepositoryHistoryTest {
     private fun answers(vararg branches: String): String =
         "case \"\$*\" in\n" + branches.joinToString("\n") + "\n  \"rev-parse HEAD\") echo $sha;;\nesac"
 
-    private fun existingRepository(body: String, syncTimeout: Duration = Duration.ofSeconds(20)): GitRepository {
+    private fun existingRepository(
+        body: String,
+        syncTimeout: Duration = Duration.ofSeconds(20),
+        deepenTimeout: Duration = Duration.ofSeconds(20),
+    ): GitRepository {
         File(repoDir, ".git").mkdirs()
-        return GitRepository(repoDir, fakeGit(body), requestTimeout = Duration.ofMillis(300), syncTimeout = syncTimeout)
+        return GitRepository(
+            repoDir, fakeGit(body), requestTimeout = Duration.ofMillis(300), syncTimeout = syncTimeout,
+            deepenTimeout = deepenTimeout, terminationGrace = Duration.ofSeconds(2),
+        )
     }
 
     private fun calledLines(): List<String> = if (calls.exists()) calls.readLines().filter { it.isNotBlank() } else emptyList()
@@ -116,10 +123,10 @@ class GitRepositoryHistoryTest {
     }
 
     @Test
-    fun `깊게 받기가 시간 제한을 넘어도 동기화는 그 제한에서 끊고 평소의 동기화로 간다`() {
+    fun `깊게 받기가 깊게 받기의 시간 제한을 넘어도 동기화는 그 제한에서 끊고 평소의 동기화로 간다`() {
         val git = existingRepository(
             answers(shallowAnswersTrue, "  \"fetch --unshallow origin main\") sleep 5;;"),
-            syncTimeout = Duration.ofMillis(700),
+            deepenTimeout = Duration.ofMillis(700),
         )
         val head = assertTimeoutPreemptively(Duration.ofSeconds(4), ThrowingSupplier { git.syncToRemoteHead() })
         assertEquals(sha, head)
@@ -286,5 +293,53 @@ class GitRepositoryHistoryTest {
         val state = git.historyState()
         assertEquals(true, state.shallow)
         assertTrue(state.problem?.contains(stillShallowWords) == true, "아직 얕다는 글이 없다: ${state.problem}")
+    }
+
+    // 강제로 끊긴 깊게 받기가 남긴 `.git/shallow.lock` 은 자동으로 지우지 않는다(두 자리가 같은 볼륨을 쓴다 — 다른 자리가 쥔 잠금일 수 있다).
+    // 그 뒤의 깊게 받기는 git 2.43 의 C 로케일 문구로 128 에 끝난다 — problem 은 잠금 파일이 남았음과 사람이 할 일을 말한다.
+    private val lockLeftWords = "잠금 파일이 남아 있다"
+    private val lockActionWords = "확인한 뒤 지운다"
+    private val lockFile by lazy { File(repoDir, ".git/shallow.lock") }
+    private val lockExistsAnswer by lazy {
+        "fatal: Unable to create '${lockFile.absolutePath}': File exists.\n\n" +
+            "Another git process seems to be running in this repository, e.g.\n" +
+            "an editor opened by 'git commit'. Please make sure all processes\n" +
+            "are terminated then try again. If it still fails, a git process\n" +
+            "may have crashed in this repository earlier:\n" +
+            "remove the file manually to continue."
+    }
+
+    @Test
+    fun `잠금 파일이 남아 깊게 받기가 실패하면 잠금을 지우지 않고 잠금이 남았다는 글을 쥐며 평소의 동기화는 끝까지 간다`() {
+        val git = existingRepository(answers(
+            shallowAnswersTrue,
+            "  \"fetch --unshallow origin main\") printf '%s\\n' \"$lockExistsAnswer\" >&2; exit 128;;",
+        ))
+        lockFile.writeText("left by an interrupted fetch\n")
+
+        assertEquals(sha, git.syncToRemoteHead())
+        assertTrue(lockFile.exists(), "남은 잠금 파일을 지웠다 — 다른 자리가 쥔 잠금일 수 있다")
+        assertEquals("left by an interrupted fetch\n", lockFile.readText(), "남은 잠금 파일을 건드렸다")
+        assertEquals(
+            listOf("fetch origin main", "reset --hard origin/main", "rev-parse HEAD"),
+            calledLines().dropWhile { it != "fetch --unshallow origin main" }.drop(1),
+            calledLines().toString(),
+        )
+        val state = git.historyState()
+        assertEquals(true, state.shallow)
+        val problem = state.problem ?: ""
+        assertTrue(problem.contains(lockLeftWords), "잠금 파일이 남았다는 글이 없다: $problem")
+        assertTrue(problem.contains(lockFile.absolutePath), "남은 잠금 파일의 경로가 없다: $problem")
+        assertTrue(problem.contains(lockActionWords), "사람이 할 일이 없다: $problem")
+    }
+
+    @Test
+    fun `잠금 파일이 없는 깊게 받기의 실패는 잠금이 남았다고 말하지 않는다`() {
+        val git = existingRepository(answers(shallowAnswersTrue, deepenFailsUnreachable))
+        git.syncToRemoteHead()
+        val problem = git.historyState().problem ?: ""
+        assertTrue(problem.contains("Could not resolve host: github.com"), problem)
+        assertFalse(problem.contains(lockLeftWords), "잠금 파일이 없는데 남았다고 말한다: $problem")
+        assertFalse(lockFile.exists())
     }
 }
