@@ -9,6 +9,8 @@ import java.io.File
 import java.nio.file.Path
 import java.time.Duration
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.random.Random
 
 /**
@@ -127,22 +129,47 @@ class GitRepositoryRealGitTest {
         assumeTrue(commandWorks("perl", "-e", "1"), "perl 이 없다 — 느린 원격을 만들 수 없다")
         createRemote()
         shallowCloneOf(remoteDir, shallowDepth)
-        // 원격의 내보내기를 64KB 마다 0.2초씩 늦춘다 — 깊게 받기의 묶음(약 1.5MB)이 몇 초 걸려, 받는 중(잠금을 쥔 채)에 상한을 넘는다
+        // 원격의 내보내기를 32KB 마다 0.25초씩 늦춘다(초당 약 128KB) — 깊게 받기의 묶음(약 1.5MB)을 받는 데 10초 남짓 걸린다.
+        // git 은 묶음을 받는 동안 `.git/shallow.lock` 을 쥔다(로컬 실측 — 시작 뒤 0.5초 안팎에 생긴다). 깊게 받기의 상한(2.5초)은 그 사이에 온다
         val slowUploadPack = File(temp.toFile(), "slow-upload-pack")
         slowUploadPack.writeText(
-            "#!/bin/sh\ngit-upload-pack \"\$@\" | perl -e 'while (sysread(STDIN, \$chunk, 65536)) " +
-                "{ syswrite(STDOUT, \$chunk); select(undef, undef, undef, 0.2); }'\n"
+            "#!/bin/sh\ngit-upload-pack \"\$@\" | perl -e 'while (sysread(STDIN, \$chunk, 32768)) " +
+                "{ syswrite(STDOUT, \$chunk); select(undef, undef, undef, 0.25); }'\n"
         )
         slowUploadPack.setExecutable(true)
         realGit(repoDir, "config", "remote.origin.uploadpack", slowUploadPack.absolutePath)
 
-        val gitRepository = repository(syncTimeout = Duration.ofSeconds(1), deepenTimeout = Duration.ofSeconds(1), terminationGrace = Duration.ofSeconds(3))
-        val firstHead = gitRepository.syncToRemoteHead()
+        // 전제: 상한이 git 이 잠금을 쥔 동안에 온다 — 첫 동기화 동안 잠금 파일을 지켜본다.
+        // 한 번도 보이지 않으면(상한이 잠금보다 먼저 왔거나 받기가 상한 전에 끝났으면) 이 테스트는 무엇도 지키지 않으므로 실패한다
+        val watching = AtomicBoolean(true)
+        val lockSeenAfterMillis = AtomicLong(-1)
+        val syncStarted = System.nanoTime()
+        val lockWatcher = Thread {
+            while (watching.get()) {
+                if (lockSeenAfterMillis.get() < 0 && lockFile.exists()) {
+                    lockSeenAfterMillis.set(Duration.ofNanos(System.nanoTime() - syncStarted).toMillis())
+                }
+                Thread.sleep(5)
+            }
+        }.apply { isDaemon = true; start() }
+
+        val deepenTimeout = Duration.ofMillis(2500)
+        val gitRepository = repository(syncTimeout = Duration.ofSeconds(5), deepenTimeout = deepenTimeout, terminationGrace = Duration.ofSeconds(3))
+        val firstHead = try {
+            gitRepository.syncToRemoteHead()
+        } finally {
+            watching.set(false)
+            lockWatcher.join(1000)
+        }
+
+        val seenAfter = lockSeenAfterMillis.get()
+        assertTrue(seenAfter >= 0, "전제가 서지 않는다: 첫 동기화 동안 .git/shallow.lock 이 한 번도 보이지 않았다 — 상한이 git 이 잠금을 쥐기 전에 왔다")
+        assertTrue(seenAfter < deepenTimeout.toMillis(), "전제가 서지 않는다: 잠금이 깊게 받기의 상한 뒤에야 보였다(${seenAfter}ms)")
         assertEquals(realGit(remoteDir, "rev-parse", "main"), firstHead, "깊게 받기가 끊겨도 평소의 동기화는 끝까지 간다")
         val afterTimeout = gitRepository.historyState()
         assertEquals(true, afterTimeout.shallow, afterTimeout.toString())
-        assertTrue(afterTimeout.problem?.contains("timeout") == true, "준비: 첫 동기화의 깊게 받기가 시간 초과가 아니다: $afterTimeout")
-        assertFalse(lockFile.exists(), "시간 초과로 끊긴 깊게 받기가 .git/shallow.lock 을 남겼다")
+        assertTrue(afterTimeout.problem?.contains("timeout") == true, "전제가 서지 않는다: 첫 동기화의 깊게 받기가 시간 초과가 아니다: $afterTimeout")
+        assertFalse(lockFile.exists(), "잠금을 쥔 채 시간 초과로 끊긴 깊게 받기가 .git/shallow.lock 을 남겼다(잠금은 ${seenAfter}ms 에 보였다)")
 
         realGit(repoDir, "config", "--unset", "remote.origin.uploadpack")
         val nextRepository = repository()
