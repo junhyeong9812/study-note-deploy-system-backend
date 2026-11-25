@@ -3,7 +3,9 @@ package xyz.junproject.backend.shared.infra
 import xyz.junproject.backend.indexing.usecase.DocumentReader
 
 import xyz.junproject.backend.content.domain.PathGuard
+import xyz.junproject.backend.content.usecase.CommitChanges
 import xyz.junproject.backend.content.usecase.CommitInfo
+import xyz.junproject.backend.content.usecase.DocHistory
 import xyz.junproject.backend.content.usecase.NoteSourcePort
 
 import xyz.junproject.backend.sync.usecase.ShaUnresolvableException
@@ -31,6 +33,8 @@ class GitRepository(
     private val deepenTimeout: Duration = DEEPEN_TIMEOUT,
     /** 시간 초과 때 종료 신호를 보낸 뒤 강제로 끊기 전까지 기다리는 시간 — 테스트가 짧게 바꾼다 */
     private val terminationGrace: Duration = TERMINATION_GRACE,
+    /** 요청 때 띄우는 글 하나의 이력 읽기를 함께 몇 개까지 — 넘는 요청은 기다리지 않고 장애(IllegalStateException) */
+    private val historyReadConcurrency: Int = HISTORY_READ_CONCURRENCY,
 ) : SourceControlPort, NoteSourcePort, DocumentReader {
     @Autowired
     constructor() : this(File(System.getenv("REPO_DIR") ?: "/data/study-note/repo"), deepenTimeout = deepenTimeoutFromEnvironment())
@@ -123,6 +127,10 @@ class GitRepository(
     /** 요청 중의 읽기 — [requestTimeout] 안에 끝나지 않으면 장애(IllegalStateException) */
     override fun currentHead(): String = run("rev-parse", "HEAD", timeout = requestTimeout, grace = Duration.ZERO).trim()
 
+    override fun recentChanges(commitLimit: Int, scanLimit: Int, docLimit: Int): List<CommitChanges> = TODO("H1")
+
+    override fun documentHistory(path: String, limit: Int): DocHistory = TODO("H1")
+
     override fun recentCommits(limit: Int): List<CommitInfo> =
         run("log", "--pretty=%H%x09%cI%x09%s", "-n", limit.toString())
             .lines().filter { it.isNotBlank() }.map { line ->
@@ -205,6 +213,8 @@ class GitRepository(
         val DEEPEN_TIMEOUT: Duration = Duration.ofSeconds(300)
         /** 종료 신호 뒤 강제로 끊기 전까지의 기본 기다림 */
         val TERMINATION_GRACE: Duration = Duration.ofSeconds(5)
+        /** 글 하나의 이력 읽기를 함께 띄우는 기본 상한 */
+        const val HISTORY_READ_CONCURRENCY = 4
         /** 깊게 받기의 시간 제한(초)을 바꾸는 환경 변수 */
         private const val DEEPEN_TIMEOUT_VARIABLE = "STUDY_NOTE_DEEPEN_TIMEOUT_SECONDS"
 

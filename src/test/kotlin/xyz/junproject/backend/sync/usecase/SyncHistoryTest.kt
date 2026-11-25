@@ -7,6 +7,7 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import xyz.junproject.backend.content.usecase.HistoryService
 import xyz.junproject.backend.content.usecase.TreeService
 import xyz.junproject.backend.indexing.usecase.IndexingService
 import xyz.junproject.backend.progress.LogCapture
@@ -30,6 +31,7 @@ class SyncHistoryTest {
         every { it.indexPaths(any(), any(), any(), any()) } returns 1
     }
     private val tree = mockk<TreeService>(relaxed = true)
+    private val recentHistory = mockk<HistoryService>(relaxed = true)
 
     @AfterEach fun closeLogs() = logs.close()
 
@@ -43,7 +45,7 @@ class SyncHistoryTest {
         script.setExecutable(true)
         val repoDir = File(temp.toFile(), "repo").also { File(it, ".git").mkdirs() }
         val git = GitRepository(repoDir, script.absolutePath, requestTimeout = Duration.ofMillis(300), syncTimeout = Duration.ofSeconds(20))
-        val service = SyncService(git, indexing, tree, logs.requestLog)
+        val service = SyncService(git, indexing, tree, logs.requestLog, recentHistory)
         val field = SyncService::class.java.getDeclaredField("stateFile")
         field.isAccessible = true
         field.set(service, File(temp.toFile(), "state/last_sha"))
@@ -178,5 +180,28 @@ class SyncHistoryTest {
         val history = history(service)
         assertEquals(true, history["shallow"])
         assertTrue((history["problem"] as? String)?.contains("잠금 파일이 남아 있다") == true, history.toString())
+    }
+
+    // 최근 변경은 동기화가 끝날 때 한 번 계산해 쥔다(명세 7절) — 성공한 동기화의 판으로 한 번, 실패한 동기화에서는 하지 않는다
+
+    @Test
+    fun `동기화가 성공하면 그 판으로 최근 변경을 한 번 다시 계산한다`() {
+        val service = service("  \"rev-parse --is-shallow-repository\") echo false;;")
+        val result = syncAndWait(service)
+
+        assertEquals("ok", result["outcome"], result.toString())
+        verify(exactly = 1) { recentHistory.rebuild(any(), sha) }
+    }
+
+    @Test
+    fun `평소의 받기가 실패한 동기화는 최근 변경을 다시 계산하지 않는다`() {
+        val service = service(
+            "  \"rev-parse --is-shallow-repository\") echo false;;",
+            "  fetch*) echo \"$unreachableAnswer\" >&2; exit 128;;",
+        )
+        val result = syncAndWait(service)
+
+        assertEquals("failed", result["outcome"], result.toString())
+        verify(exactly = 0) { recentHistory.rebuild(any(), any()) }
     }
 }

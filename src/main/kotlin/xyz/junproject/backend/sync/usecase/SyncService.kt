@@ -22,6 +22,8 @@ class SyncService(
     private val indexing: IndexingService,
     private val tree: TreeService,
     private val requestLog: RequestLog,
+    /** 동기화가 끝날 때 최근 변경을 다시 계산한다 */
+    private val historyService: xyz.junproject.backend.content.usecase.HistoryService,
 ) {
     private val stateFile = File(System.getenv("STATE_FILE") ?: "/data/study-note/last_sha")
     private val inFlightSha = AtomicReference<String?>(null)
