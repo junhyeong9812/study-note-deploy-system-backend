@@ -46,7 +46,6 @@ interface EscalatePort {
 /**
  * 대화 이력(Redis `chat:{session}:{문서 경로}`)을 세션 단위로 보고 지운다 — 내 기록 지우기(명세 12 · 18).
  * sessionId 는 부르는 쪽이 꼴(`chat_session` 의 UUID 꼴)을 확인한 값이다. Redis 오류는 DataAccessException 으로 던진다.
- * 뼈대 — task 03b 의 구현 워커가 구현을 붙인다.
  */
 interface ChatHistoryPort {
     /** 그 세션의 대화 이력이 하나라도 있나 */

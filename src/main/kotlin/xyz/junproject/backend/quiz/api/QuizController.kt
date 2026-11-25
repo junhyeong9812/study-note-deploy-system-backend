@@ -44,7 +44,7 @@ class QuizController(
         QuizRejection.INVALID_REQUEST, QuizRejection.ANSWER_TOO_LONG -> HttpStatus.UNPROCESSABLE_ENTITY
         QuizRejection.NOT_FOUND, QuizRejection.ATTEMPT_NOT_FOUND, QuizRejection.VISITOR_UNKNOWN, QuizRejection.NOT_ANSWERED -> HttpStatus.NOT_FOUND
         QuizRejection.QUIZ_UNAVAILABLE, QuizRejection.QUESTION_CHANGED, QuizRejection.ATTEMPT_ID_TAKEN -> HttpStatus.CONFLICT
-        QuizRejection.STORAGE_UNAVAILABLE -> HttpStatus.SERVICE_UNAVAILABLE
+        QuizRejection.STORAGE_UNAVAILABLE, QuizRejection.CONTENT_UNAVAILABLE -> HttpStatus.SERVICE_UNAVAILABLE
     }
 
     private fun <T> respond(outcome: QuizOutcome<T>, body: (T) -> Map<String, Any?>): ResponseEntity<Map<String, Any?>> = when (outcome) {
@@ -110,6 +110,7 @@ class QuizController(
                 "not_saved_reason" to result.notSavedReason?.name?.lowercase(),
                 "attempt" to result.attempt?.let(::attemptJson),
                 "correct_answer" to correctAnswerJson(result.correctAnswer),
+                "correct_answer_unavailable" to result.correctAnswerUnavailable,
             )
         }
         // 저장됐을 때만 쿠키를 놓는다(새 방문자는 발급, 아는 방문자는 기한 늘리기) — 확인 불가 · 상한 · 거절에는 놓지도 지우지도 않는다
@@ -151,8 +152,7 @@ class QuizController(
         @RequestHeader("X-Request-Id", required = false) incomingId: String?,
     ): ResponseEntity<Map<String, Any?>> {
         val requestId = requestLog.acceptOrIssue(incomingId)
-        val review = quizService.review(requestId, visitorToken)
-        return ResponseEntity.ok(Envelope.ok(mapOf(
+        return respond(quizService.review(requestId, visitorToken)) { review -> mapOf(
             "progress" to review.progress.name.lowercase(),
             "items" to review.items.map { item ->
                 mapOf(
@@ -165,7 +165,7 @@ class QuizController(
             "missing_topics" to review.missingTopics,
             "unsplittable_topics" to review.unsplittableTopics,
             "missing_questions" to review.missingQuestions,
-        )))
+        ) }
     }
 
     @GetMapping("/my-records")

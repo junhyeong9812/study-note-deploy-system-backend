@@ -4,7 +4,6 @@ import java.security.MessageDigest
 
 /**
  * cs 주제의 질문 파일(`1-question.md`)과 정답 파일(`3-answer.md`)을 질문 단위로 쪼개 같은 번호끼리 짝짓는다.
- * 뼈대 — 구현은 task 03a 의 구현 워커가 채운다(계약은 QuizSplitterTest).
  */
 object QuizSplitter {
     /** 두 파일의 글을 받아 질문 단위로 쪼갠다. 쪼갤 수 없으면 [QuizSplitResult.Unsplittable] — 예외를 던지지 않는다. */

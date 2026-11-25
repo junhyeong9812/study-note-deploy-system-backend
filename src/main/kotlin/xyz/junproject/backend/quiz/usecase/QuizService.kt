@@ -22,7 +22,6 @@ import xyz.junproject.backend.quiz.domain.QuizSplitResult
 import xyz.junproject.backend.quiz.domain.QuizSplitter
 import xyz.junproject.backend.shared.infra.RequestLog
 import java.io.FileNotFoundException
-import java.nio.file.NoSuchFileException
 import java.time.Clock
 import java.util.UUID
 
@@ -30,6 +29,8 @@ import java.util.UUID
 enum class QuizRejection {
     INVALID_REQUEST, ANSWER_TOO_LONG, NOT_FOUND, QUIZ_UNAVAILABLE, QUESTION_CHANGED,
     ATTEMPT_ID_TAKEN, ATTEMPT_NOT_FOUND, VISITOR_UNKNOWN, NOT_ANSWERED, STORAGE_UNAVAILABLE,
+    /** 내용 저장소(git)를 읽지 못함 — 없음이 아니라 장애(명세 23) */
+    CONTENT_UNAVAILABLE,
 }
 
 sealed interface QuizOutcome<out T> {
@@ -67,12 +68,16 @@ data class AnswerRequest(
 /** 저장하지 못했지만 정답은 싣는 경우 셋(명세 19) */
 enum class NotSavedReason { STORAGE_UNAVAILABLE, NEW_VISITOR_RATE_LIMITED, DAILY_LIMIT_REACHED }
 
-/** 답을 낸 결과 — 저장됐으면 [attempt] 와 쿠키에 놓을 [cookieToken], 아니면 [notSavedReason]. 정답은 두 경우 모두 싣는다 */
+/**
+ * 답을 낸 결과 — 저장됐으면 [attempt] 와 쿠키에 놓을 [cookieToken], 아니면 [notSavedReason]. 정답은 두 경우 모두 싣는다.
+ * [correctAnswerUnavailable]: 저장된 시도의 정답을 찾다 내용 장애가 남(정답 칸이 빈 까닭이 "없음"이 아님)
+ */
 data class AnswerResult(
     val attempt: StoredAttempt?,
     val notSavedReason: NotSavedReason?,
     val correctAnswer: QuizAnswer?,
     val cookieToken: String?,
+    val correctAnswerUnavailable: Boolean = false,
 )
 
 /** 다시 보기 — [correctAnswer] 는 지금 질문의 시도가 있을 때만. 옛 질문의 시도는 [outdatedAttempts] 로 가른다 */
@@ -121,7 +126,7 @@ class QuizService(
     private val newVisitorsPerMinute: Int = NEW_VISITORS_PER_MINUTE,
     /** 복습 목록이 읽는 시도 줄 수의 상한(명세 18.2 — 넘으면 최근 것부터, 잘렸다고 표시) */
     private val reviewAttemptLimit: Int = REVIEW_ATTEMPT_LIMIT,
-    /** 쪼갠 결과를 (판의 SHA, 주제)로 기억하는 수의 상한(명세 23 — 오래 안 쓴 것부터 버린다). 뼈대 — task 03b 리뷰 루프 3 의 구현 워커가 쓴다 */
+    /** 쪼갠 결과를 (판의 SHA, 주제)로 기억하는 수의 상한(명세 23 — 오래 안 쓴 것부터 버린다) */
     private val contentCacheSize: Int = CONTENT_CACHE_SIZE,
 ) {
     companion object {
@@ -180,25 +185,64 @@ class QuizService(
 
     // ── 내용 읽기 ──────────────────────────────────────────
 
+    /** 내용 저장소를 읽지 못함(git 의 장애 · 시간 초과) — "없음"과 다르다. 퀴즈 경로는 503 content_unavailable 로 답한다 */
+    private class ContentUnavailable(cause: Exception) : RuntimeException(cause)
+
+    /** 기억한 쪼갠 결과 — [content] 가 null 이면 그 판에 그 주제가 없다 */
+    private class RememberedTopic(val content: QuizSplitResult?)
+
+    /**
+     * (판의 SHA, 주제) → 쪼갠 결과. 판으로 읽은 글은 바뀌지 않아 기억해도 틀릴 수 없다. 상한을 넘으면 오래 안 쓴 것부터 버린다(접근 순서).
+     * 넣고 꺼내기만 잠금 안에서 한다 — git 을 기다리는 동안 잠금을 쥐지 않는다. 같은 키를 둘이 함께 읽으면 둘 다 읽는다(결과는 같다).
+     */
+    private val rememberedTopics = object : LinkedHashMap<Pair<String, String>, RememberedTopic>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Pair<String, String>, RememberedTopic>?): Boolean = size > contentCacheSize
+    }
+
     private fun questionFile(topic: String) = "$topic/1-question.md"
     private fun answerFile(topic: String) = "$topic/3-answer.md"
 
-    /** 파일이 없으면 null — 다른 읽기 실패는 그대로 던진다 */
-    private fun readOrNull(read: () -> String): String? =
-        try { read() } catch (_: FileNotFoundException) { null } catch (_: NoSuchFileException) { null }
+    /** 판을 지정한 읽기 — 그 판에 그 파일이 없으면 null, 그 밖의 실패는 [ContentUnavailable] */
+    private fun readAt(sha: String, path: String): String? =
+        try {
+            notes.readFileAt(sha, path)
+        } catch (_: FileNotFoundException) {
+            null
+        } catch (error: Exception) {
+            throw ContentUnavailable(error)
+        }
 
-    /** 지금 판의 SHA — 한 요청에서 한 번 읽어 그 값으로 읽는다(두 번 읽으면 SHA 와 글이 갈릴 수 있다) */
-    private fun currentHead(): String = notes.currentHead().trim()
+    /** 지금 판의 SHA — 한 요청에서 한 번 읽어 그 값으로 읽는다(두 번 읽으면 SHA 와 글이 갈릴 수 있다). 실패는 [ContentUnavailable] */
+    private fun currentHead(): String =
+        try {
+            notes.currentHead().trim()
+        } catch (error: Exception) {
+            throw ContentUnavailable(error)
+        }
 
     /**
      * [sha] 판의 그 주제(git) — 그 판을 읽을 수 없으면(얕은 사본 · 없는 SHA · 그때 없던 주제) null. 정답 파일이 없으면 정답이 모자란 주제로 쪼개진다.
      * 퀴즈 경로는 내용을 늘 판을 지정해 읽는다 — 작업 트리는 어느 판의 글인지 보장하지 않는다(동기화는 파일을 먼저 바꾸고 지금 판의 표시를
-     * 나중에 옮긴다, 명세 22). [sha] 는 [COMMIT_SHA] 를 통과한 값이거나 지금 판의 SHA
+     * 나중에 옮긴다, 명세 22). [sha] 는 [COMMIT_SHA] 를 통과한 값이거나 지금 판의 SHA.
+     * 두 파일을 다 읽은 뒤에만 기억한다 — 장애([ContentUnavailable])는 기억하지 않는다
      */
     private fun topicAt(sha: String, topic: String): QuizSplitResult? {
-        val questions = readOrNull { notes.readFileAt(sha, questionFile(topic)) } ?: return null
-        return QuizSplitter.split(questions, readOrNull { notes.readFileAt(sha, answerFile(topic)) } ?: "")
+        val key = sha to topic
+        synchronized(rememberedTopics) { rememberedTopics[key] }?.let { remembered -> return remembered.content }
+        val questions = readAt(sha, questionFile(topic))
+        val content = questions?.let { QuizSplitter.split(it, readAt(sha, answerFile(topic)) ?: "") }
+        synchronized(rememberedTopics) { rememberedTopics[key] = RememberedTopic(content) }
+        return content
     }
+
+    /** 내용 장애의 로그 — 검증을 통과한 [subject] 와 예외의 종류만(답 본문 · 토큰 · 정답 글을 쓰지 않는다) */
+    private fun contentFailure(requestId: String, action: String, subject: String, failure: ContentUnavailable): QuizOutcome.Rejected {
+        logContentFailure(requestId, action, subject, failure)
+        return QuizOutcome.Rejected(QuizRejection.CONTENT_UNAVAILABLE)
+    }
+
+    private fun logContentFailure(requestId: String, action: String, subject: String, failure: ContentUnavailable) =
+        requestLog.log(requestId, "quiz $action content unavailable $subject: ${failure.cause?.javaClass?.simpleName}", "error")
 
     /**
      * [sha] 판의 그 주제와 실제로 읽은 판의 SHA — 그 판을 읽을 수 없으면 지금 판의 SHA 를 얻어 그 SHA 로 읽는다
@@ -223,6 +267,15 @@ class QuizService(
         return if (question.hash == attempt.questionHash) split.answerOf(attempt.questionNumber) else null
     }
 
+    /** 저장된 시도의 정답과 "찾다 장애가 남" — 장애면 ERROR 로그를 남기고 정답 칸을 비운다(저장된 것은 그대로 돌려준다) */
+    private fun storedAnswerOf(requestId: String, attempt: StoredAttempt): Pair<QuizAnswer?, Boolean> =
+        try {
+            answerOf(attempt) to false
+        } catch (failure: ContentUnavailable) {
+            logContentFailure(requestId, "answer", "topic=${attempt.topicPath} question=${attempt.questionNumber}", failure)
+            null to true
+        }
+
     // ── 질문 목록 ──────────────────────────────────────────
 
     /** 지금 질문(같은 번호 · 같은 해시)의 시도로만 상태를 계산한다 — 해시만으로 짝짓지 않는다(번호가 바뀐 같은 글은 옛 기록) */
@@ -235,8 +288,12 @@ class QuizService(
     /** 질문 목록 — 정답은 싣지 않는다. 쿠키가 있으면 그 주제의 시도만 읽어 상태를 붙인다(방문자를 만들지 않는다) */
     fun questions(requestId: String, presentedToken: String?, topicValue: String?): QuizOutcome<QuestionList> {
         val topic = topicValue?.takeIf(::isTopicPath) ?: return rejected(requestId, "questions", QuizRejection.INVALID_REQUEST, "topic")
-        val contentSha = currentHead()
-        val content = topicAt(contentSha, topic) ?: return rejected(requestId, "questions", QuizRejection.NOT_FOUND, "topic=$topic")
+        val (contentSha, read) = try {
+            currentHead().let { head -> head to topicAt(head, topic) }
+        } catch (failure: ContentUnavailable) {
+            return contentFailure(requestId, "questions", "topic=$topic", failure)
+        }
+        val content = read ?: return rejected(requestId, "questions", QuizRejection.NOT_FOUND, "topic=$topic")
         if (content is QuizSplitResult.Unsplittable) {
             requestLog.log(requestId, "quiz questions unavailable topic=$topic reason=${content.reason}")
             return QuizOutcome.Done(QuestionList(topic, contentSha, content, ProgressLoad.NONE, emptyList()))
@@ -282,13 +339,18 @@ class QuizService(
             if (own is VisitorRead.Read && own.value != null) {
                 val stored = own.value
                 requestLog.log(requestId, "quiz answer retransmission topic=${stored.topicPath} question=${stored.questionNumber}")
-                return QuizOutcome.Done(AnswerResult(stored, null, answerOf(stored), presentedToken))
+                val (storedAnswer, answerUnavailable) = storedAnswerOf(requestId, stored)
+                return QuizOutcome.Done(AnswerResult(stored, null, storedAnswer, presentedToken, answerUnavailable))
             }
         }
 
         val subject = "topic=$topic question=$number"
-        val (versionSha, content) = topicForSha(contentSha, topic)
-            ?: return rejected(requestId, action, QuizRejection.NOT_FOUND, "topic=$topic")
+        val version = try {
+            topicForSha(contentSha, topic)
+        } catch (failure: ContentUnavailable) {
+            return contentFailure(requestId, action, subject, failure)
+        }
+        val (versionSha, content) = version ?: return rejected(requestId, action, QuizRejection.NOT_FOUND, "topic=$topic")
         val split = content as? QuizSplitResult.Split ?: return rejected(requestId, action, QuizRejection.QUIZ_UNAVAILABLE, subject)
         val question = split.questions.firstOrNull { it.number == number }
             ?: return rejected(requestId, action, QuizRejection.INVALID_REQUEST, "$subject(no such question)")
@@ -309,7 +371,8 @@ class QuizService(
                 val sameQuestion = stored.topicPath == topic && stored.questionNumber == number &&
                     stored.contentSha == versionSha && stored.questionHash == questionHash
                 // 같은 시도 번호로 다른 질문을 다시 보냈으면 처음 저장된 시도의 정답이다(시도 번호가 기준 — 명세 19)
-                QuizOutcome.Done(AnswerResult(stored, null, if (sameQuestion) correctAnswer else answerOf(stored), outcome.cookieToken))
+                val (storedAnswer, answerUnavailable) = if (sameQuestion) correctAnswer to false else storedAnswerOf(requestId, stored)
+                QuizOutcome.Done(AnswerResult(stored, null, storedAnswer, outcome.cookieToken, answerUnavailable))
             }
             SubmitOutcome.StorageUnavailable -> notSaved(NotSavedReason.STORAGE_UNAVAILABLE)
             SubmitOutcome.NewVisitorRateLimited -> notSaved(NotSavedReason.NEW_VISITOR_RATE_LIMITED)
@@ -342,7 +405,12 @@ class QuizService(
         val topic = topicValue?.takeIf(::isTopicPath) ?: return rejected(requestId, action, QuizRejection.INVALID_REQUEST, "topic")
         val number = numberValue?.takeIf(QUESTION_NUMBER::matches)?.toInt()
             ?: return rejected(requestId, action, QuizRejection.INVALID_REQUEST, "question number")
-        val content = topicAt(currentHead(), topic) ?: return rejected(requestId, action, QuizRejection.NOT_FOUND, "topic=$topic")
+        val read = try {
+            topicAt(currentHead(), topic)
+        } catch (failure: ContentUnavailable) {
+            return contentFailure(requestId, action, "topic=$topic", failure)
+        }
+        val content = read ?: return rejected(requestId, action, QuizRejection.NOT_FOUND, "topic=$topic")
         val split = content as? QuizSplitResult.Split ?: return rejected(requestId, action, QuizRejection.QUIZ_UNAVAILABLE, "topic=$topic")
         val question = split.questions.firstOrNull { it.number == number }
             ?: return rejected(requestId, action, QuizRejection.INVALID_REQUEST, "topic=$topic question=$number(no such question)")
@@ -364,11 +432,11 @@ class QuizService(
      * 복습일이 된 지금 질문의 목록 — 최근 시도 [reviewAttemptLimit] 줄까지 읽는다(한 줄 더 읽어 잘렸는지 안다).
      * 주제마다 지금 판을 읽어 같은 번호 · 같은 해시의 시도로만 계산하고, 없어진 주제 · 쪼갤 수 없는 주제 · 없어진 질문 번호는 센다.
      */
-    fun review(requestId: String, presentedToken: String?): ReviewList {
+    fun review(requestId: String, presentedToken: String?): QuizOutcome<ReviewList> {
         val attempts = when (val read = progress.recentAttempts(requestId, presentedToken, reviewAttemptLimit + 1)) {
             is VisitorRead.Read -> read.value
-            VisitorRead.NoVisitor -> return ReviewList(ProgressLoad.NONE, emptyList(), false, 0, 0, 0)
-            VisitorRead.StorageUnavailable -> return ReviewList(ProgressLoad.UNAVAILABLE, emptyList(), false, 0, 0, 0)
+            VisitorRead.NoVisitor -> return QuizOutcome.Done(ReviewList(ProgressLoad.NONE, emptyList(), false, 0, 0, 0))
+            VisitorRead.StorageUnavailable -> return QuizOutcome.Done(ReviewList(ProgressLoad.UNAVAILABLE, emptyList(), false, 0, 0, 0))
         }
         val truncated = attempts.size > reviewAttemptLimit
         val today = today()
@@ -376,27 +444,34 @@ class QuizService(
         var missingTopics = 0
         var unsplittableTopics = 0
         var missingQuestions = 0
-        val head = currentHead()
-        attempts.takeLast(reviewAttemptLimit).groupBy { it.topicPath }.forEach { (topic, topicAttempts) ->
-            // 저장된 주제 경로도 꼴을 본 뒤에만 파일 경로로 쓴다. 주제마다 git 프로세스 둘 — 무거워지면 쪼갠 결과를 판과 주제로 기억한다
-            when (val content = if (isTopicPath(topic)) topicAt(head, topic) else null) {
-                null -> missingTopics += 1
-                is QuizSplitResult.Unsplittable -> unsplittableTopics += 1
-                is QuizSplitResult.Split -> topicAttempts.groupBy { it.questionNumber }.forEach { (number, questionAttempts) ->
-                    val question = content.questions.firstOrNull { it.number == number }
-                    if (question == null) {
-                        missingQuestions += 1
-                    } else {
-                        val questionProgress = ReviewSchedule.progressOf(questionAttempts.filter { it.questionHash == question.hash }.map { it.reviewed() })
-                        if (questionProgress.isDueOn(today)) items += ReviewItem(topic, question, questionProgress)
+        // 장애는 "없어진 주제"로 세지 않는다 — 한 주제라도 읽지 못하면 목록 전체를 503 으로(명세 23)
+        var readingTopic = "-"
+        try {
+            val head = currentHead()
+            attempts.takeLast(reviewAttemptLimit).groupBy { it.topicPath }.forEach { (topic, topicAttempts) ->
+                // 저장된 주제 경로도 꼴을 본 뒤에만 파일 경로로 쓴다. 주제마다 git 프로세스 둘(처음 한 번 — 그 뒤는 기억한 것)
+                if (isTopicPath(topic)) readingTopic = topic
+                when (val content = if (isTopicPath(topic)) topicAt(head, topic) else null) {
+                    null -> missingTopics += 1
+                    is QuizSplitResult.Unsplittable -> unsplittableTopics += 1
+                    is QuizSplitResult.Split -> topicAttempts.groupBy { it.questionNumber }.forEach { (number, questionAttempts) ->
+                        val question = content.questions.firstOrNull { it.number == number }
+                        if (question == null) {
+                            missingQuestions += 1
+                        } else {
+                            val questionProgress = ReviewSchedule.progressOf(questionAttempts.filter { it.questionHash == question.hash }.map { it.reviewed() })
+                            if (questionProgress.isDueOn(today)) items += ReviewItem(topic, question, questionProgress)
+                        }
                     }
                 }
             }
+        } catch (failure: ContentUnavailable) {
+            return contentFailure(requestId, "review", "topic=$readingTopic", failure)
         }
         val ordered = items.sortedWith(compareBy({ it.progress.nextReviewOn }, { it.topic }, { it.question.number }))
         requestLog.log(requestId, "quiz review items=${ordered.size} truncated=$truncated missingTopics=$missingTopics " +
             "unsplittableTopics=$unsplittableTopics missingQuestions=$missingQuestions")
-        return ReviewList(ProgressLoad.LOADED, ordered, truncated, missingTopics, unsplittableTopics, missingQuestions)
+        return QuizOutcome.Done(ReviewList(ProgressLoad.LOADED, ordered, truncated, missingTopics, unsplittableTopics, missingQuestions))
     }
 
     // ── 내 기록 ────────────────────────────────────────────
