@@ -44,7 +44,8 @@ class GitRepositoryReadTest {
     fun `있는 파일은 그 판을 지정해 읽어 글을 돌려준다`() {
         val git = repository("printf '%s' 'FILE-BODY'")
         assertEquals("FILE-BODY", git.readFileAt(sha, path).trim())
-        assertTrue(calls.readText().contains("show") && calls.readText().contains("$sha:$path"), calls.readText())
+        // 판 표시는 커밋으로 묶어 읽는다 — 폴더의 tree · 글의 blob 을 판으로 주면 그 안의 숨김 글이 읽히기 때문이다(GitRepositoryReadAtObjectTest)
+        assertTrue(calls.readText().contains("show") && calls.readText().contains("$sha^{commit}:$path"), calls.readText())
     }
 
     @Test
