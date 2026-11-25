@@ -317,7 +317,7 @@ class ProgressStoreEngineTest {
         assertEquals(1, count("SELECT count(*) FROM quiz_attempt"))
     }
 
-    // ── 리뷰 루프 1 반영(명세 15) ─────────────────────────
+    // ── 첫 시도는 방문자 줄과 한 묶음 · 보관 삭제는 묶음으로 ─────────────────
 
     @Test
     fun `첫 시도는 방문자 줄과 함께 한 묶음으로 들어간다`() {
@@ -369,7 +369,7 @@ class ProgressStoreEngineTest {
         assertEquals(0, count("SELECT count(*) FROM quiz_attempt"))
     }
 
-    // ── 리뷰 루프 2 반영(명세 16) ─────────────────────────
+    // ── 상태 계산용 시도 목록은 답 본문을 읽지 않는다 ─────────────────
 
     /** 실제 연결을 감싸 DB 로 보낸 SQL 글을 모은다(PreparedStatement · Statement 모두) */
     private class SqlRecordingDataSource(private val delegate: javax.sql.DataSource) : org.springframework.jdbc.datasource.AbstractDataSource() {

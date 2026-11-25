@@ -89,7 +89,7 @@ class ProgressStoreRecoveryEngineTest {
         assertNotNull(store.createVisitor("s".repeat(64), today, now))
     }
 
-    // ── 리뷰 루프 2 반영(명세 16) ─────────────────────────
+    // ── 넣은 것은 저장됐다고 답한다 · 풀 바닥은 DB 장애가 아니다 ─────────────────
 
     @Test
     fun `기존 방문자의 시도와 채점은 연결 한 번으로 넣고 읽어 넣은 뒤 DB 를 잃어도 저장됐다고 답한다`() {

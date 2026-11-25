@@ -386,7 +386,7 @@ class StudyProgressServiceTest {
         }
     }
 
-    // ── 리뷰 루프 1 반영(명세 15) ─────────────────────────
+    // ── 첫 답의 묶음 · 저장할 수 없는 글자 · 보관 삭제의 묶음 · 시도 목록 ─────────────────
 
     @Test
     fun `쿠키 없는 첫 답의 시도 번호가 남의 것이면 방문자 줄이 늘지 않는다`() {
@@ -469,7 +469,7 @@ class StudyProgressServiceTest {
         assertEquals(AttemptsOutcome.StorageUnavailable, service().attempts("req-2", token))
     }
 
-    // ── 리뷰 루프 2 반영(명세 16) ─────────────────────────
+    // ── NUL 이 든 SHA · 해시 · 보관 삭제의 중간 실패 · 본문 없는 상태 계산용 줄 ─────────────────
 
     @Test
     fun `내용 SHA 나 질문 해시에 NUL 이 있으면 저장소에 닿지 않고 잘못된 입력으로 거절한다`() {

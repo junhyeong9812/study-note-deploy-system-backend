@@ -106,8 +106,8 @@ class AnswerRetransmissionTest {
 
     @Test
     fun `쿠키 없는 요청과 모르는 토큰은 이 길을 타지 않아 바뀐 질문에 저장하지 않는다`() {
-        val (token, _) = bed.knownVisitor()
-        bed.submit(body(), bed.visitorCookie(token))
+        val (_, visitor) = bed.knownVisitor()
+        storedWithoutReadingContent(visitor)
         contentChangesAndOldShaIsGone()
 
         listOf(bed.submit(body()), bed.submit(body(), bed.visitorCookie("Z".repeat(43)))).forEach { response ->
@@ -136,10 +136,21 @@ class AnswerRetransmissionTest {
         bed.notes.history[QuizContent.HEAD to "$TOPIC/3-answer.md"] = QuizContent.PROCESS_ANSWERS
     }
 
+    /**
+     * 처음 판을 한 번도 읽지 않은 채 저장된 이 테스트의 시도(질문 2, 처음 판 HEAD) — 그 판의 응답에 실렸을 attempt.
+     * 읽은 판은 기억되므로(명세 23 — 판의 글은 바뀌지 않는다) "그 판을 더는 읽을 수 없음"을 보는 테스트는 이것으로 시작한다.
+     */
+    private fun storedWithoutReadingContent(visitor: xyz.junproject.backend.progress.usecase.Visitor): Map<String, Any?> {
+        bed.putAttempt(visitor, TOPIC, 2, QuizTestBed.NOW, answer = "처음 쓴 답", attemptId = attemptId)
+        assertEquals(emptyList<Pair<String, String>>(), bed.notes.readsAt)
+        return mapOf("attempt_id" to attemptId.toString(), "topic" to TOPIC, "question_number" to 2,
+            "submitted_at" to "2026-11-25T01:00:00Z", "grade" to null, "graded_at" to null)
+    }
+
     @Test
     fun `옛 판을 읽을 수 없고 질문이 바뀌었으면 재전송은 저장됨이지만 정답 칸이 비고 정답 글이 하나도 없다`() {
-        val (token, _) = bed.knownVisitor()
-        val first = bed.submit(body(), bed.visitorCookie(token))
+        val (token, visitor) = bed.knownVisitor()
+        val first = storedWithoutReadingContent(visitor)
         contentChangesAndOldShaIsGone()   // 지금 판의 질문 2 는 다른 글 · 정답은 ANSWER-MARK-OLD-2
 
         val again = bed.submit(body(), bed.visitorCookie(token))
@@ -147,7 +158,7 @@ class AnswerRetransmissionTest {
         assertEquals(200, again.status, again.contentAsString)
         val data = bed.data(again)
         assertEquals(true, data["saved"])
-        assertEquals(attemptOf(first), attemptOf(again))
+        assertEquals(first, attemptOf(again))
         assertTrue(data.containsKey("correct_answer"), data.toString())
         assertNull(data["correct_answer"], "바뀐 질문의 정답이 나갔다: ${again.contentAsString}")
         assertNoAnswerText(again.contentAsString)
@@ -171,8 +182,8 @@ class AnswerRetransmissionTest {
 
     @Test
     fun `옛 판을 읽을 수 없어도 질문 글이 그대로면 재전송에는 지금 판의 그 질문의 정답이 실린다`() {
-        val (token, _) = bed.knownVisitor()
-        bed.submit(body(), bed.visitorCookie(token))
+        val (token, visitor) = bed.knownVisitor()
+        storedWithoutReadingContent(visitor)
         val newAnswers = QuizContent.PROCESS_ANSWERS.replace("ANSWER-MARK-2 스레드는 주소 공간을 함께 쓴다.", "ANSWER-MARK-NEW-2 고친 정답.")
         contentChangesAndOldShaIsGone(QuizContent.PROCESS_QUESTIONS, newAnswers)
 
@@ -203,21 +214,21 @@ class AnswerRetransmissionTest {
 
     @Test
     fun `저장된 주제가 없어졌거나 쪼갤 수 없게 되면 재전송은 저장됨이고 정답 칸이 빈다`() {
-        val (token, _) = bed.knownVisitor()
-        val first = bed.submit(body(), bed.visitorCookie(token))
+        val (token, visitor) = bed.knownVisitor()
+        val first = storedWithoutReadingContent(visitor)
         val unsplittable = QuizContent.PROCESS_ANSWERS.substringBefore("### 2.")   // 정답 2 · 3 이 모자람
         contentChangesAndOldShaIsGone(QuizContent.PROCESS_QUESTIONS, unsplittable)
 
         val whenUnsplittable = bed.submit(body(), bed.visitorCookie(token))
         assertEquals(200, whenUnsplittable.status, whenUnsplittable.contentAsString)
         assertEquals(true, bed.data(whenUnsplittable)["saved"])
-        assertEquals(attemptOf(first), attemptOf(whenUnsplittable))
+        assertEquals(first, attemptOf(whenUnsplittable))
         assertNull(bed.data(whenUnsplittable)["correct_answer"], whenUnsplittable.contentAsString)
 
         bed.notes.commit(QuizContent.NEWER_SHA, mapOf("$TOPIC/1-question.md" to null, "$TOPIC/2-summary.md" to null, "$TOPIC/3-answer.md" to null))
         val whenGone = bed.submit(body(), bed.visitorCookie(token))
         assertEquals(200, whenGone.status, whenGone.contentAsString)
-        assertEquals(attemptOf(first), attemptOf(whenGone))
+        assertEquals(first, attemptOf(whenGone))
         assertNull(bed.data(whenGone)["correct_answer"], whenGone.contentAsString)
         assertNoAnswerText(whenGone.contentAsString)
         assertEquals(1, bed.fake.attempts.size)

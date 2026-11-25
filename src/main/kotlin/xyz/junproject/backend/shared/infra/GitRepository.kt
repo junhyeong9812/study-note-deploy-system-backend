@@ -10,14 +10,24 @@ import xyz.junproject.backend.sync.usecase.ShaUnresolvableException
 
 import xyz.junproject.backend.sync.usecase.SourceControlPort
 
+import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Component
 import java.io.File
+import java.time.Duration
 import java.util.concurrent.TimeUnit
 
 /** study-note clone 볼륨 관리 — shell git (es-index.md D5-1: diff가 색인 입력의 정본). */
 @Component
-class GitRepository : SourceControlPort, NoteSourcePort, DocumentReader {
-    private val repoDir = File(System.getenv("REPO_DIR") ?: "/data/study-note/repo")
+class GitRepository(
+    private val repoDir: File,
+    /** git 실행 파일 — 테스트가 가짜 git 으로 바꾼다. 뼈대 — task 03b 리뷰 루프 3 의 구현 워커가 명령에 쓴다(계약은 GitRepositoryReadTest) */
+    private val gitCommand: String = "git",
+    /** 요청 중의 읽기(readFileAt · currentHead)의 시간 제한(명세 23 — 기본 5초). 뼈대 — 구현 워커가 쓴다. 내용 동기화의 제한은 그대로 */
+    private val requestTimeout: Duration = REQUEST_TIMEOUT,
+) : SourceControlPort, NoteSourcePort, DocumentReader {
+    @Autowired
+    constructor() : this(File(System.getenv("REPO_DIR") ?: "/data/study-note/repo"))
+
     private val remote = System.getenv("STUDY_NOTE_REMOTE")
         ?: "https://github.com/junhyeong9812/study-note.git"
 
@@ -87,6 +97,9 @@ class GitRepository : SourceControlPort, NoteSourcePort, DocumentReader {
     }
 
     companion object {
+        /** 요청 중의 git 읽기의 기본 시간 제한(명세 23) */
+        val REQUEST_TIMEOUT: Duration = Duration.ofSeconds(5)
+
         /** --name-status 출력 파싱 (순수 함수 — 테스트 이음새, B9). R은 D(구)+A(신)로 분해 */
         fun parseNameStatus(output: String): List<Pair<Char, String>> =
             output.lines().filter { it.isNotBlank() }.flatMap { line ->

@@ -121,10 +121,14 @@ class QuizService(
     private val newVisitorsPerMinute: Int = NEW_VISITORS_PER_MINUTE,
     /** 복습 목록이 읽는 시도 줄 수의 상한(명세 18.2 — 넘으면 최근 것부터, 잘렸다고 표시) */
     private val reviewAttemptLimit: Int = REVIEW_ATTEMPT_LIMIT,
+    /** 쪼갠 결과를 (판의 SHA, 주제)로 기억하는 수의 상한(명세 23 — 오래 안 쓴 것부터 버린다). 뼈대 — task 03b 리뷰 루프 3 의 구현 워커가 쓴다 */
+    private val contentCacheSize: Int = CONTENT_CACHE_SIZE,
 ) {
     companion object {
         const val NEW_VISITORS_PER_MINUTE = 30
         const val REVIEW_ATTEMPT_LIMIT = 5_000
+        /** 쪼갠 결과를 기억하는 수의 기본 상한(명세 23) */
+        const val CONTENT_CACHE_SIZE = 2_000
         /** 복습 목록에 싣는 질문 글의 앞부분 — 질문 글의 앞 이만큼(String.take) */
         const val REVIEW_PREVIEW_CHARS = 80
 

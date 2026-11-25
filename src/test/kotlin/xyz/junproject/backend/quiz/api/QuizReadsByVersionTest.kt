@@ -56,7 +56,8 @@ class QuizReadsByVersionTest {
         assertEquals(200, again.status, again.contentAsString)
         assertEquals(2, (bed.data(again)["correct_answer"] as Map<*, *>)["number"])
         assertEquals(emptyList<String>(), bed.notes.reads, "퀴즈 경로가 작업 트리를 읽었다")
-        assertTrue((QuizContent.HEAD to "$TOPIC/1-question.md") in bed.notes.readsAt, bed.notes.readsAt.toString())
+        // 처음 판은 첫 답에서 이미 읽어 기억했다(명세 23) — 다시 읽는다면 그 판으로만
+        assertTrue(bed.notes.readsAt.all { (sha, _) -> sha == QuizContent.HEAD }, bed.notes.readsAt.toString())
     }
 
     @Test
@@ -75,5 +76,26 @@ class QuizReadsByVersionTest {
         val response = bed.revisit(TOPIC, "2", bed.visitorCookie(token))
         assertEquals(200, response.status, response.contentAsString)
         assertReadOnlyAt(QuizContent.HEAD, "$TOPIC/1-question.md", "$TOPIC/3-answer.md")
+    }
+
+    @Test
+    fun `질문 목록은 지금 판을 한 번만 읽는다 - 읽은 직후 새 판이 커밋돼도 응답의 SHA 와 글 해시가 같은 판의 것이다`() {
+        bed.notes.afterCurrentHead = {
+            bed.notes.commit(QuizContent.NEW_SHA, mapOf("$TOPIC/1-question.md" to QuizContent.OLD_PROCESS_QUESTIONS,
+                "$TOPIC/3-answer.md" to QuizContent.OLD_PROCESS_ANSWERS))
+        }
+
+        val response = bed.questions(TOPIC)
+
+        assertEquals(200, response.status, response.contentAsString)
+        val data = bed.data(response)
+        val sha = data["content_sha"] as String
+        val files = bed.notes.filesAt(sha)
+        val split = xyz.junproject.backend.quiz.domain.QuizSplitter.split(files.getValue("$TOPIC/1-question.md"), files.getValue("$TOPIC/3-answer.md"))
+            as xyz.junproject.backend.quiz.domain.QuizSplitResult.Split
+        @Suppress("UNCHECKED_CAST")
+        val questions = data["questions"] as List<Map<String, Any?>>
+        assertEquals(split.questions.map { it.hash }, questions.map { it["hash"] }, "응답의 SHA($sha) 판과 글 · 해시가 다른 판의 것이다")
+        assertEquals(QuizContent.HEAD, sha, "지금 판을 두 번 읽었다")
     }
 }

@@ -29,7 +29,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * 명세 20 — Redis 가 응답 없이 멈춰도 요청이 오래 붙잡히지 않는다. 연결은 받지만 한 글자도 답하지 않는 가짜 Redis 에
- * **앱의 실제 설정**(`application.yml` 을 읽은 Redis 자동 설정)으로 붙인다 — 설정이 없으면 명령 하나가 60초를 기다린다(리뷰어 재현).
+ * **앱의 실제 설정**(`application.yml` 을 읽은 Redis 자동 설정)으로 붙인다 — 설정이 없으면 명령 하나가 Lettuce 기본값인 60초를 기다린다.
  * 실제 시간에 기대므로 느리다(초록에서 합쳐 십여 초). 한계를 넘으면 그 자리에서 끊는다(assertTimeoutPreemptively).
  */
 class RedisStallTest {

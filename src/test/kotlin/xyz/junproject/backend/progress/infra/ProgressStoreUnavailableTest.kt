@@ -105,7 +105,7 @@ class ProgressStoreUnavailableTest {
         assertTrue(dataSource.connectionAttempts > afterFirstFailure, "쉼이 지났는데 다시 닿아 보지 않았다")
     }
 
-    // ── 리뷰 루프 2 반영(명세 16) ─────────────────────────
+    // ── 쉼은 DB 에 닿지 못했을 때만 걸고 흐른 시간으로 잰다 ─────────────────
 
     @Test
     fun `쉼은 흐른 시간으로 재므로 벽시계와 무관하게 쉼 길이가 지나면 다시 닿아 본다`() {

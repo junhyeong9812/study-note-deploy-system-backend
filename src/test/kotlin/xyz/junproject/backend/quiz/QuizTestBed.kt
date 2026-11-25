@@ -56,7 +56,21 @@ class FakeNoteSource : NoteSourcePort {
     val readsAt = mutableListOf<Pair<String, String>>()
 
     override fun allMarkdown(): List<String> = current.keys.sorted()
-    override fun currentHead(): String = head
+    /** 지금 판의 표시를 읽는 것의 장애 — 참이면 currentHead() 가 장애(없음이 아니다)로 실패한다 */
+    var currentHeadFails = false
+    /** currentHead() 가 값을 돌려준 직후에 한 번 돈다 — "읽은 직후 새 판이 커밋됨"을 만든다. 한 번 돌면 비워진다 */
+    var afterCurrentHead: (() -> Unit)? = null
+    /** 판을 지정한 읽기의 장애 — 이 경로의 readFileAt 은 어느 판이든 [IllegalStateException]("git timeout")으로 실패한다(FileNotFoundException 과 다르다) */
+    val failingPaths = mutableSetOf<String>()
+    /** 그 판의 그 경로만 장애 — (SHA, 경로) */
+    val failingAt = mutableSetOf<Pair<String, String>>()
+
+    override fun currentHead(): String {
+        if (currentHeadFails) throw IllegalStateException("git timeout (fake): rev-parse HEAD")
+        val value = head
+        afterCurrentHead?.let { hook -> afterCurrentHead = null; hook() }
+        return value
+    }
 
     override fun readFile(path: String): String {
         reads += path
@@ -65,6 +79,7 @@ class FakeNoteSource : NoteSourcePort {
     override fun recentCommits(limit: Int): List<CommitInfo> = emptyList()
     override fun readFileAt(sha: String, path: String): String {
         readsAt += sha to path
+        if (path in failingPaths || (sha to path) in failingAt) throw IllegalStateException("git timeout (fake): show $sha:$path")
         return history[sha to path] ?: throw FileNotFoundException("$sha:$path")
     }
 
@@ -261,6 +276,7 @@ class QuizTestBed(
     start: Instant = NOW,
     newVisitorsPerMinute: Int? = null,
     reviewAttemptLimit: Int? = null,
+    contentCacheSize: Int? = null,
 ) : AutoCloseable {
     companion object {
         /** 한국 시각 2026-11-25 10:00 — 분의 시작 */
@@ -280,13 +296,15 @@ class QuizTestBed(
         ("T".repeat(37) + "%06d".format(issuedTokens.size + 1)).also { issuedTokens += it }
     })
 
-    val quizService: QuizService = when {
-        newVisitorsPerMinute != null && reviewAttemptLimit != null -> QuizService(notes, progress, chatHistory, clock, logs.requestLog,
-            newVisitorsPerMinute = newVisitorsPerMinute, reviewAttemptLimit = reviewAttemptLimit)
-        newVisitorsPerMinute != null -> QuizService(notes, progress, chatHistory, clock, logs.requestLog, newVisitorsPerMinute = newVisitorsPerMinute)
-        reviewAttemptLimit != null -> QuizService(notes, progress, chatHistory, clock, logs.requestLog, reviewAttemptLimit = reviewAttemptLimit)
-        else -> QuizService(notes, progress, chatHistory, clock, logs.requestLog)
-    }
+    val quizService: QuizService =
+        if (newVisitorsPerMinute == null && reviewAttemptLimit == null && contentCacheSize == null) {
+            QuizService(notes, progress, chatHistory, clock, logs.requestLog)   // 기본값 그대로(기본 상한을 보는 테스트가 쓴다)
+        } else {
+            QuizService(notes, progress, chatHistory, clock, logs.requestLog,
+                newVisitorsPerMinute = newVisitorsPerMinute ?: QuizService.NEW_VISITORS_PER_MINUTE,
+                reviewAttemptLimit = reviewAttemptLimit ?: QuizService.REVIEW_ATTEMPT_LIMIT,
+                contentCacheSize = contentCacheSize ?: QuizService.CONTENT_CACHE_SIZE)
+        }
 
     val mockMvc: MockMvc = MockMvcBuilders.standaloneSetup(QuizController(quizService, logs.requestLog))
         .setControllerAdvice(GlobalErrorHandler(logs.requestLog)).build()
@@ -352,8 +370,8 @@ class QuizTestBed(
         visitor: Visitor, topic: String, number: Int, submittedAt: Instant, grade: Grade? = null,
         questionHash: String = QuizContent.hashOf(topic, number), answer: String = "준비한 답 $topic $number",
         contentSha: String = QuizContent.HEAD,
+        attemptId: UUID = UUID.randomUUID(),
     ): UUID {
-        val attemptId = UUID.randomUUID()
         fake.put(visitor.id, AnswerSubmission(attemptId, topic, number, answer, contentSha, questionHash), submittedAt)
         if (grade != null) fake.putGrade(attemptId, grade, submittedAt.plusSeconds(60))
         return attemptId

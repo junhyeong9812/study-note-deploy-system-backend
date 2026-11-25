@@ -28,4 +28,29 @@ class ContentControllerTest {
         assertEquals(404, response.statusCode.value())
         assertEquals(false, (response.body as Map<*, *>)["success"])
     }
+
+    // 명세 23 — 문서 주소로 옛 판을 여는 길(`/api/doc?at=`)도 같은 판을 지정한 읽기를 쓴다: 없음만 404, git 의 장애는 404 가 아니라 오류다
+
+    @Test
+    fun `옛 판에 없는 파일이나 없는 판은 404 not_found 다`() {
+        val git = mockk<NoteSourcePort>(relaxed = true)
+        every { git.readFileAt(any(), any()) } throws java.io.FileNotFoundException("abcdef1:cs/none/2-summary.md")
+        val response = ContentController(git, mockk(relaxed = true), mockk(relaxed = true)).getDoc("cs/none/2-summary.md", "abcdef1", null)
+        assertEquals(404, response.statusCode.value())
+        assertEquals("not_found", ((response.body as Map<*, *>)["error"] as Map<*, *>)["code"])
+    }
+
+    @Test
+    fun `옛 판을 읽다 git 이 장애면 404 가 아니라 전역 처리기의 500 이다`() {
+        val git = mockk<NoteSourcePort>(relaxed = true)
+        every { git.readFileAt(any(), any()) } throws IllegalStateException("git timeout")
+        val requestLog = mockk<xyz.junproject.backend.shared.infra.RequestLog>(relaxed = true)
+        val mockMvc = org.springframework.test.web.servlet.setup.MockMvcBuilders
+            .standaloneSetup(ContentController(git, mockk(relaxed = true), requestLog))
+            .setControllerAdvice(xyz.junproject.backend.shared.api.GlobalErrorHandler(requestLog)).build()
+        val response = mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/api/doc")
+            .param("path", "cs/os/process/2-summary.md").param("at", "abcdef1")).andReturn().response
+        assertEquals(500, response.status, response.contentAsString)
+        assertTrue(response.contentAsString.contains("\"internal\""), response.contentAsString)
+    }
 }
