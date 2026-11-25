@@ -46,7 +46,7 @@ class GitRepository(
         if (!File(repoDir, ".git").exists()) {
             repoDir.parentFile.mkdirs()
             run("clone", remote, repoDir.absolutePath, workDir = repoDir.parentFile)
-            history = HistoryState(shallow = false, problem = null)
+            history = historyAfterReceiving()
         } else {
             history = deepenIfShallow()
             run("fetch", "origin", "main")
@@ -68,13 +68,21 @@ class GitRepository(
             "false" -> HistoryState(shallow = false, problem = null)
             "true" -> try {
                 run("fetch", "--unshallow", "origin", "main")
-                HistoryState(shallow = false, problem = null)
+                historyAfterReceiving()
             } catch (error: IllegalStateException) {
                 HistoryState(shallow = true, problem = error.message ?: error.toString())
             }
             else -> HistoryState(shallow = null, problem = "얕은지 알 수 없는 답(rev-parse --is-shallow-repository): ${answer.take(300)}")
         }
     }
+
+    /**
+     * 받기가 성공한 뒤의 상태 — 원격이 얕은 사본이면 받기가 성공해도 git 의 얕은 표시(`.git/shallow`)가 남는다. 그때는 얕다고 드러낸다
+     * (git 을 더 띄우지 않는다). `.git` 이 폴더가 아니면(작업 공간의 `gitdir:` 파일) 표시를 볼 수 없어 받기의 성공대로 얕지 않다고 둔다
+     */
+    private fun historyAfterReceiving(): HistoryState =
+        if (File(repoDir, ".git/shallow").exists()) HistoryState(shallow = true, problem = STILL_SHALLOW)
+        else HistoryState(shallow = false, problem = null)
 
     /** prev..HEAD의 md 변경 목록. shallow 경계 밖 prev면 ShaUnresolvable → 호출부가 full로 강등 (B7) */
     override fun changedMarkdown(prevSha: String, headSha: String): List<Pair<Char, String>> {
@@ -151,6 +159,8 @@ class GitRepository(
         val REQUEST_TIMEOUT: Duration = Duration.ofSeconds(5)
         /** 내용 동기화 · 목록 명령의 기본 시간 제한(명령마다 — 첫 깊게 받기도 이 안에 든다) */
         private val SYNC_TIMEOUT: Duration = Duration.ofSeconds(120)
+        /** 받기가 성공했는데 얕은 표시가 남은 때의 problem — 다음 동기화에서 다시 깊게 받기를 시도한다 */
+        private const val STILL_SHALLOW = "받기는 끝났으나 저장소가 아직 얕다(.git/shallow 가 남음 — 원격이 얕은 사본일 수 있다). 다음 동기화에서 다시 깊게 받는다"
 
         /** `git show <판>:<경로>` 의 "없음" 답(C 로케일) — 그 판에 그 파일이 없음 · 작업 트리에만 있음 · 그 판이 없음 */
         private val NOT_FOUND_ANSWERS = listOf(
