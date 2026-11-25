@@ -13,16 +13,39 @@ class HistoryService(private val git: NoteSourcePort, private val requestLog: Re
 
     data class RecentChanges(val commitSha: String, val commits: List<CommitChanges>)
 
+    @Volatile private var cached: RecentChanges? = null
+
     /** 동기화가 끝날 때 — 계산이 실패하면 던지지 않고 WARN 을 남기며 앞의 것을 그대로 쥔다(동기화를 실패로 만들지 않는다) */
-    fun rebuild(requestId: String, commitSha: String): Unit = TODO("H1")
+    fun rebuild(requestId: String, commitSha: String) {
+        val commits = try {
+            git.recentChanges(RECENT_COMMIT_LIMIT, RECENT_SCAN_LIMIT, DOCS_PER_COMMIT_LIMIT)
+        } catch (error: Exception) {
+            requestLog.log(requestId, "history rebuild failed sha=$commitSha (keeps sha=${cached?.commitSha}): ${error.message?.take(300)}", "warning")
+            return
+        }
+        // 첫 요청이 만드는 중이면 그것이 끝난 뒤에 바꿔 끼운다 — 옛 판이 새 판을 덮지 않게
+        synchronized(this) { cached = RecentChanges(commitSha, commits) }
+        requestLog.log(requestId, "history rebuilt sha=$commitSha commits=${commits.size}")
+    }
 
-    /** 쥔 최근 변경 — 없으면 지금 판으로 만든다. git 의 장애는 IllegalStateException(빈 목록이 아니다) */
-    fun recent(requestId: String): RecentChanges = TODO("H1")
+    /** 쥔 최근 변경 — 없으면 지금 판으로 만든다. git 의 장애는 IllegalStateException(빈 목록이 아니다). 실패는 쥐지 않는다 */
+    fun recent(requestId: String): RecentChanges {
+        cached?.let { return it }
+        synchronized(this) {
+            cached?.let { return it }
+            val headSha = git.currentHead()
+            val commits = git.recentChanges(RECENT_COMMIT_LIMIT, RECENT_SCAN_LIMIT, DOCS_PER_COMMIT_LIMIT)
+            return RecentChanges(headSha, commits).also {
+                cached = it
+                requestLog.log(requestId, "history built lazily sha=$headSha commits=${commits.size}")
+            }
+        }
+    }
 
-    /** 글 하나의 변경 목록 — [REVISION_LIMIT] 개까지 */
-    fun documentHistory(requestId: String, path: String): DocHistory = TODO("H1")
+    /** 글 하나의 변경 목록 — [REVISION_LIMIT] 개까지. 없음(FileNotFoundException) · 장애(IllegalStateException)는 그대로 올린다 */
+    fun documentHistory(requestId: String, path: String): DocHistory = git.documentHistory(path, REVISION_LIMIT)
 
-    fun historyState(): HistoryState = TODO("H1")
+    fun historyState(): HistoryState = git.historyState()
 
     companion object {
         /** 최근 변경에 싣는 커밋의 수 */

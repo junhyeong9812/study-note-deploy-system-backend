@@ -3,9 +3,12 @@ package xyz.junproject.backend.shared.infra
 import xyz.junproject.backend.indexing.usecase.DocumentReader
 
 import xyz.junproject.backend.content.domain.PathGuard
+import xyz.junproject.backend.content.usecase.ChangeKind
+import xyz.junproject.backend.content.usecase.ChangedDoc
 import xyz.junproject.backend.content.usecase.CommitChanges
 import xyz.junproject.backend.content.usecase.CommitInfo
 import xyz.junproject.backend.content.usecase.DocHistory
+import xyz.junproject.backend.content.usecase.DocRevision
 import xyz.junproject.backend.content.usecase.NoteSourcePort
 
 import xyz.junproject.backend.sync.usecase.ShaUnresolvableException
@@ -16,7 +19,9 @@ import xyz.junproject.backend.sync.usecase.SourceControlPort
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Component
 import java.io.File
+import java.io.FileNotFoundException
 import java.time.Duration
+import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 
 /** study-note clone 볼륨 관리 — shell git (es-index.md D5-1: diff가 색인 입력의 정본). */
@@ -41,6 +46,9 @@ class GitRepository(
 
     private val remote = System.getenv("STUDY_NOTE_REMOTE")
         ?: "https://github.com/junhyeong9812/study-note.git"
+
+    /** 글 하나의 이력 읽기의 자리 — [historyReadConcurrency] 개 */
+    private val historyReads = Semaphore(historyReadConcurrency)
 
     /** 마지막 동기화가 알아낸 이력의 상태 — 요청 스레드들이 읽는다. 값 하나를 통째로 바꿔 끼운다 */
     @Volatile private var history: HistoryState = HistoryState.UNKNOWN
@@ -127,9 +135,72 @@ class GitRepository(
     /** 요청 중의 읽기 — [requestTimeout] 안에 끝나지 않으면 장애(IllegalStateException) */
     override fun currentHead(): String = run("rev-parse", "HEAD", timeout = requestTimeout, grace = Duration.ZERO).trim()
 
-    override fun recentChanges(commitLimit: Int, scanLimit: Int, docLimit: Int): List<CommitChanges> = TODO("H1")
+    /** 요청 중의 읽기([requestTimeout] · 기다림 없이 끊음). 공개되는 글을 바꾸지 않은 커밋도 훑은 수([scanLimit])에는 든다 */
+    override fun recentChanges(commitLimit: Int, scanLimit: Int, docLimit: Int): List<CommitChanges> {
+        if (!hasCommits()) return emptyList()
+        val output = readHistory("log", "-z", "--no-merges", "-n", scanLimit.toString(), "-M", "--name-status", "--format=$HISTORY_FORMAT", "HEAD")
+        return parseHistory(output).mapNotNull { entry ->
+            val docs = entry.changes.mapNotNull { change -> publicChange(change) }
+            if (docs.isEmpty()) null
+            else CommitChanges(entry.sha, entry.at, entry.title, docs.take(docLimit), maxOf(0, docs.size - docLimit))
+        }.take(commitLimit)
+    }
 
-    override fun documentHistory(path: String, limit: Int): DocHistory = TODO("H1")
+    /**
+     * 요청 중의 읽기([requestTimeout] · 기다림 없이 끊음). 존재 확인부터 log 까지 한 자리를 쥐고, 자리가 없으면 기다리지 않고 장애.
+     * 사용자 경로는 늘 `--` 뒤에 두고 pathspec 마법을 끈다(`--literal-pathspecs`)
+     */
+    override fun documentHistory(path: String, limit: Int): DocHistory {
+        if (!historyReads.tryAcquire()) error("이력 읽기가 함께 ${historyReadConcurrency}개를 넘었다")
+        try {
+            if (!hasCommits() || !existsAtHead(path)) throw FileNotFoundException(path)
+            val output = readHistory("log", "-z", "--no-merges", "--follow", "-M", "--name-status", "--format=$HISTORY_FORMAT", "HEAD", "--", path)
+            val revisions = parseHistory(output).mapNotNull { entry ->
+                // 그 판에서의 경로 = name-status 의 마지막 칸(옮겨졌으면 새 경로)
+                val pathThen = entry.changes.lastOrNull()?.path ?: return@mapNotNull null
+                if (isPublicDoc(pathThen)) DocRevision(entry.sha, entry.at, entry.title, pathThen) else null
+            }
+            return DocHistory(revisions.take(limit), maxOf(0, revisions.size - limit))
+        } finally {
+            historyReads.release()
+        }
+    }
+
+    /** 커밋이 하나라도 있는가 — `rev-parse --verify -q` 가 1 이고 아무것도 내지 않을 때만 빈 저장소. 그 밖의 실패는 장애 */
+    private fun hasCommits(): Boolean {
+        val arguments = arrayOf("rev-parse", "--verify", "-q", "HEAD^{commit}")
+        val (exitCode, output) = execute(arguments, repoDir, requestTimeout, Duration.ZERO)
+        if (exitCode == 0) return true
+        if (exitCode == 1 && output.isBlank()) return false
+        error("git 실패(${arguments.joinToString(" ")}): ${output.take(300)}")
+    }
+
+    /** 지금 판(HEAD)에 [path] 라는 파일이 있는가 — 폴더는 아니다 */
+    private fun existsAtHead(path: String): Boolean =
+        readHistory("ls-tree", "-z", "HEAD", "--", path).split('\u0000').any { entry ->
+            entry.substringAfter('\t', "") == path && entry.substringBefore('\t').split(' ').getOrNull(1) == "blob"
+        }
+
+    /** 이력 읽기의 git — pathspec 마법을 끄고, 요청 상한에서 기다림 없이 끊는다 */
+    private fun readHistory(vararg arguments: String): String =
+        run("--literal-pathspecs", *arguments, timeout = requestTimeout, grace = Duration.ZERO)
+
+    /** 바뀐 파일 하나를 공개되는 글의 변경으로 — 숨김 경계를 넘는 옮김은 더해짐 · 지워짐. 공개되는 글이 아니면 null */
+    private fun publicChange(change: NameStatus): ChangedDoc? {
+        val newPublic = isPublicDoc(change.path)
+        val oldPublic = change.oldPath?.let { oldPath -> isPublicDoc(oldPath) } ?: false
+        return when (change.status) {
+            'A', 'C' -> if (newPublic) ChangedDoc(change.path, ChangeKind.ADDED) else null
+            'D' -> if (newPublic) ChangedDoc(change.path, ChangeKind.DELETED) else null
+            'R' -> when {
+                oldPublic && newPublic -> ChangedDoc(change.path, ChangeKind.RENAMED, from = change.oldPath)
+                newPublic -> ChangedDoc(change.path, ChangeKind.ADDED)
+                oldPublic -> ChangedDoc(change.oldPath!!, ChangeKind.DELETED)
+                else -> null
+            }
+            else -> if (newPublic) ChangedDoc(change.path, ChangeKind.MODIFIED) else null
+        }
+    }
 
     override fun recentCommits(limit: Int): List<CommitInfo> =
         run("log", "--pretty=%H%x09%cI%x09%s", "-n", limit.toString())
@@ -237,6 +308,40 @@ class GitRepository(
             Regex("""fatal: path '.*' exists on disk, but not in '"""),
             Regex("""fatal: invalid object name '"""),
         )
+
+        /** 이력 읽기의 커밋 머리 — 커밋마다 기록 구분 문자(0x1e)로 시작하고 sha · 커밋 시각 · 제목 한 줄을 NUL 로 가른다(본문 · 글쓴이는 읽지 않는다) */
+        private const val HISTORY_FORMAT = "%x1e%H%x00%cI%x00%s"
+
+        /** 공개되는 글 — `.md` 이고 숨김 폴더 밖 */
+        private fun isPublicDoc(path: String): Boolean = path.endsWith(".md") && !PathGuard.isHidden(path)
+
+        /** 바뀐 파일 하나 — [path] 는 마지막 칸(옮김 · 복사면 새 경로), [oldPath] 는 옮김 · 복사의 옛 경로 */
+        private data class NameStatus(val status: Char, val path: String, val oldPath: String?)
+
+        private class HistoryEntry(val sha: String, val at: String, val title: String, val changes: List<NameStatus>)
+
+        /**
+         * `log -z --name-status --format=[HISTORY_FORMAT]` 의 출력 — 커밋마다 `0x1e sha NUL 시각 NUL 제목 NUL`, 바뀐 파일이 있으면
+         * 줄바꿈 하나 뒤에 `상태 NUL 경로 NUL`(옮김 · 복사는 `상태 NUL 옛 경로 NUL 새 경로 NUL`). 경로는 따옴표로 감싸지지 않는다
+         */
+        private fun parseHistory(output: String): List<HistoryEntry> =
+            output.split('\u001e').filter { record -> record.isNotEmpty() }.map { record ->
+                val fields = record.split('\u0000')
+                val changes = mutableListOf<NameStatus>()
+                var index = 3
+                while (index < fields.size) {
+                    val status = fields[index].trimStart('\n')
+                    if (status.isEmpty()) { index++; continue }
+                    if (status[0] == 'R' || status[0] == 'C') {
+                        changes += NameStatus(status[0], fields[index + 2], oldPath = fields[index + 1])
+                        index += 3
+                    } else {
+                        changes += NameStatus(status[0], fields[index + 1], oldPath = null)
+                        index += 2
+                    }
+                }
+                HistoryEntry(sha = fields[0], at = fields.getOrElse(1) { "" }, title = fields.getOrElse(2) { "" }, changes = changes)
+            }
 
         /** --name-status 출력 파싱 (순수 함수 — 테스트 이음새, B9). R은 D(구)+A(신)로 분해 */
         fun parseNameStatus(output: String): List<Pair<Char, String>> =

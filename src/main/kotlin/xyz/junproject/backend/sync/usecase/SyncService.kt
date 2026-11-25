@@ -94,6 +94,7 @@ class SyncService(
             }
             if (effectiveFull) indexing.deleteStale(requestId, headSha)   // 고아 정리 (B7)
             tree.rebuild(requestId, headSha)   // 트리는 sync 성공 시에만 변한다 (#12)
+            historyService.rebuild(requestId, headSha)   // 최근 변경도 이때 한 번 — 실패는 WARN 으로 남고 동기화는 성공
             writeLastSha(headSha)      // 전량 성공 후에만 전진 (D5-3)
             val tookMs = System.currentTimeMillis() - startedMs
             requestLog.log(requestId, "sync ok sha=$headSha files=${changes.size} chunks=$chunks ${tookMs}ms")

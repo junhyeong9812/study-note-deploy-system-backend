@@ -42,15 +42,6 @@ class ContentController(
         return ResponseEntity.ok(Envelope.ok(mapOf("count" to docs.size, "docs" to docs)))
     }
 
-    @GetMapping("/history")
-    fun history(@RequestHeader("X-Request-Id", required = false) incomingId: String?):
-            ResponseEntity<Map<String, Any?>> {
-        val requestId = requestLog.acceptOrIssue(incomingId)
-        val commits = git.recentCommits(30)
-        requestLog.log(requestId, "history ${commits.size} commits")
-        return ResponseEntity.ok(Envelope.ok(mapOf("commits" to commits)))
-    }
-
     @GetMapping("/doc")
     fun getDoc(@RequestParam path: String,
                @RequestParam(required = false) at: String?,
