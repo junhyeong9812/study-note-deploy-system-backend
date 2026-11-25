@@ -210,10 +210,12 @@ class GitRepository(
 
     /**
      * 그 판의 그 파일(요청 중의 읽기 — [requestTimeout]). git 이 "그 판에 그 파일이 없다 · 그 판이 없다"고 답한 경우만
-     * FileNotFoundException(없음 — 문서 주소는 404), 그 밖의 실패(시간 초과 · 저장소가 아님 · 깨진 객체)는 IllegalStateException(장애)
+     * FileNotFoundException(없음 — 문서 주소는 404), 그 밖의 실패(시간 초과 · 저장소가 아님 · 깨진 객체)는 IllegalStateException(장애).
+     * 판 표시는 커밋으로 묶어(`^{commit}`) 읽는다 — 폴더의 tree · 글의 blob id 를 판으로 주면 그 안의 숨김 글이 읽히기 때문이다.
+     * 커밋이 아닌 객체는 git 이 "invalid object name" 으로 답해 없음이 되고, 주석 달린 태그는 가리키는 커밋으로 풀린다
      */
     override fun readFileAt(sha: String, path: String): String {
-        val (exitCode, output) = execute(arrayOf("-c", "core.quotepath=off", "show", "$sha:$path"), repoDir, requestTimeout, Duration.ZERO)
+        val (exitCode, output) = execute(arrayOf("-c", "core.quotepath=off", "show", "$sha^{commit}:$path"), repoDir, requestTimeout, Duration.ZERO)
         if (exitCode == 0) return output
         if (NOT_FOUND_ANSWERS.any { answer -> answer.containsMatchIn(output) }) throw java.io.FileNotFoundException("$sha:$path")
         error("git 실패(show $sha:$path): ${output.take(300)}")
