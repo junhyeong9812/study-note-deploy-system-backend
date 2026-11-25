@@ -52,6 +52,7 @@ class SyncServiceTest {
         every { git.syncToRemoteHead() } returns "head77"
         every { git.changedMarkdown(any(), any()) } returns listOf('A' to "cs/x/2-summary.md")
         every { git.allMarkdown() } returns listOf("cs/x/2-summary.md")
+        every { git.historyState() } returns HistoryState(shallow = false, problem = null)
         val indexing = mockk<IndexingService>(relaxed = true)
         every { indexing.indexPaths(any(), any(), any(), any()) } returns 3
         val service = SyncService(git, indexing, mockk(relaxed = true), mockk<RequestLog>(relaxed = true))

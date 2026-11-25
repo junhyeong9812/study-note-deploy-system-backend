@@ -8,6 +8,7 @@ import xyz.junproject.backend.content.usecase.NoteSourcePort
 
 import xyz.junproject.backend.sync.usecase.ShaUnresolvableException
 
+import xyz.junproject.backend.sync.usecase.HistoryState
 import xyz.junproject.backend.sync.usecase.SourceControlPort
 
 import org.springframework.beans.factory.annotation.Autowired
@@ -24,6 +25,8 @@ class GitRepository(
     private val gitCommand: String = "git",
     /** 요청 중의 읽기(readFileAt · currentHead)의 시간 제한(명세 23 — 기본 5초). 내용 동기화 · 목록 명령은 [SYNC_TIMEOUT] */
     private val requestTimeout: Duration = REQUEST_TIMEOUT,
+    /** 내용 동기화 · 목록 명령의 시간 제한(명령마다) — 테스트가 짧게 바꾼다 */
+    private val syncTimeout: Duration = SYNC_TIMEOUT,
 ) : SourceControlPort, NoteSourcePort, DocumentReader {
     @Autowired
     constructor() : this(File(System.getenv("REPO_DIR") ?: "/data/study-note/repo"))
@@ -41,6 +44,8 @@ class GitRepository(
         }
         return run("rev-parse", "HEAD").trim()
     }
+
+    override fun historyState(): HistoryState = TODO("H0 — 구현 전 뼈대")
 
     /** prev..HEAD의 md 변경 목록. shallow 경계 밖 prev면 ShaUnresolvable → 호출부가 full로 강등 (B7) */
     override fun changedMarkdown(prevSha: String, headSha: String): List<Pair<Char, String>> {
