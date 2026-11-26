@@ -257,9 +257,11 @@ class ChatService(
             is EscalateResult.Answered ->
                 requestLog.log(requestId, "claude run: result=answered auto=$auto duration_ms=$durationMillis" + if (result.truncated) " truncated=true" else "")
             is EscalateResult.Refused -> {
+                // 덧붙이기만 한다 — 앞의 글자(`claude run: result=<낱말>`)를 알림 규칙이 찾는다
+                val status = result.status?.let { " status=$it" } ?: ""
                 val code = result.code?.let { " code=$it" } ?: ""
                 val level = if (result.reason == EscalateRefusal.REJECTED) "error" else "warning"
-                requestLog.log(requestId, "claude run: result=${result.reason.word} auto=$auto duration_ms=$durationMillis$code", level)
+                requestLog.log(requestId, "claude run: result=${result.reason.word} auto=$auto duration_ms=$durationMillis$status$code", level)
             }
         }
     }
