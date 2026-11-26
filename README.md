@@ -41,3 +41,22 @@ content/   {api, usecase, domain}    ContentController · TreeService · NoteSou
 - `complete` 는 저장소가 얕지 않다고 알려졌을 때만 참이다(얕음 · 재시작 뒤 첫 동기화 전이면 거짓). `history` 는 동기화 상태의 그것과 같다.
 - git 의 실패 · 시간 초과(요청 중의 읽기 5초) · 동시 읽기 상한 초과 · 최근 변경의 첫 계산이 도는 중이거나 방금 실패함은 빈 목록이 아니라 503 `content_unavailable`.
 - 경로 검증(`PathGuard`)은 `/api/doc` · 옛 판 읽기 · 채팅과 같다 — `./docs/x.md` 처럼 `.` · 빈 마디로 숨김 폴더를 가리키는 경로도 422 로 거절한다.
+
+## 주인 판정
+
+Claude 로 가는 경로(지금은 `POST /api/chat/escalate`)는 주인만 지난다. 주인은 서버가 쿠키 하나로 판정한다 — 머리 · 질의 · 몸의 칸 · 다른 쿠키는 보지 않는다.
+
+- 쿠키 `study_owner` = `ow1.<만든 시각 ms>.<서명>`. 서명은 HMAC-SHA256(열쇠 = `OWNER_COOKIE_SECRET` 의 UTF-8 바이트, 줄 = `study-owner` LF `ow1` LF `<만든 시각 ms>`)의 base64url(채움 없음 43글자)이고 글자 그대로 상수 시간에 견준다. 만든 시각에서 30일까지 받고, 지금보다 60초 넘게 앞선 시각은 받지 않는다. 쿠키를 심고 지우는 것은 어드민이다 — backend 는 읽기만 한다.
+- 열쇠 `OWNER_COOKIE_SECRET`: 어드민과 같은 값 · 32바이트 이상. 없거나 짧으면 **누구도 주인이 아니다**(닫힌 쪽 — 뜰 때 그 이름을 말하는 WARN 한 줄).
+- `GET /api/owner` → `{owner: true|false}`(언제나 200 · `Cache-Control: no-store` · `Vary: Cookie`). front 가 단추를 보일지 정하는 데만 쓴다 — 이것만 믿고 여는 길은 없다.
+- 주인이 아닌 `POST /api/chat/escalate` 는 몸의 검증보다 먼저 403 `owner_only` — Claude 쪽 · 대화 이력 · 문서 읽기에 닿지 않고 세션 쿠키도 심지 않는다.
+- 되돌리는 법: 열쇠를 바꾸면(어드민과 함께) 지금까지의 표시가 한꺼번에 무효가 된다. 열쇠를 비우면 주인이 없어진다.
+- 판정은 요청 로그에 `owner=true` 또는 `owner=false reason=<낱말>` 로 남는다(쿠키의 값 · 서명은 남기지 않는다).
+
+| 낱말 | 뜻 |
+|---|---|
+| `no_secret` | 열쇠가 없거나 비었거나 공백뿐이거나 32바이트보다 짧다 |
+| `no_cookie` | `study_owner` 쿠키가 없다 |
+| `malformed` | 같은 이름의 쿠키가 둘 이상 · 값의 꼴이 틀림 · 만든 시각이 지금보다 60초 넘게 앞섬 |
+| `bad_signature` | 서명이 맞지 않는다(다른 열쇠 · 고친 값) |
+| `expired` | 만든 시각에서 30일이 지났다 |

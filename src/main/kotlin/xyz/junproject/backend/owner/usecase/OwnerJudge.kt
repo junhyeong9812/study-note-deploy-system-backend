@@ -2,7 +2,10 @@ package xyz.junproject.backend.owner.usecase
 
 import jakarta.servlet.http.HttpServletRequest
 import org.springframework.beans.factory.annotation.Autowired
+import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
+import xyz.junproject.backend.owner.api.OwnerCookie
+import xyz.junproject.backend.owner.domain.OwnerMark
 import xyz.junproject.backend.owner.domain.OwnerVerdict
 import xyz.junproject.backend.shared.infra.RequestLog
 import java.time.Clock
@@ -21,9 +24,22 @@ class OwnerJudge(
     @Autowired
     constructor(requestLog: RequestLog) : this(System.getenv(SECRET_VARIABLE), Clock.systemUTC(), requestLog)
 
-    fun judge(requestId: String, request: HttpServletRequest): OwnerVerdict = TODO("2a")
+    init {
+        if (!OwnerMark.usableSecret(secret)) {
+            logger.warn("$SECRET_VARIABLE 이 없거나 ${OwnerMark.MIN_SECRET_BYTES}바이트보다 짧다 — 누구도 주인이 아니다(Claude 로 가는 경로는 모두 거절)")
+        }
+    }
+
+    /** 요청의 쿠키 가운데 이름이 정확히 `study_owner` 인 것만 본다 */
+    fun judge(requestId: String, request: HttpServletRequest): OwnerVerdict {
+        val values = request.cookies?.filter { cookie -> cookie.name == OwnerCookie.NAME }?.map { cookie -> cookie.value } ?: emptyList()
+        val verdict = OwnerMark.verify(values, secret, clock.instant())
+        requestLog.log(requestId, if (verdict.owner) "owner=true" else "owner=false reason=${verdict.reason?.word}")
+        return verdict
+    }
 
     companion object {
         const val SECRET_VARIABLE = "OWNER_COOKIE_SECRET"
+        private val logger = LoggerFactory.getLogger(OwnerJudge::class.java)
     }
 }

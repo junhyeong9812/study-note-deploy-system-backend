@@ -183,6 +183,10 @@ class ChatController @org.springframework.beans.factory.annotation.Autowired con
                  @RequestHeader("X-Request-Id", required = false) incomingId: String?):
             ResponseEntity<Map<String, Any?>> {
         val requestId = requestLog.acceptOrIssue(incomingId)
+        // 주인의 판정이 먼저 — 주인이 아니면 몸의 검증 결과도 보이지 않고, 세션 쿠키도 심지 않으며, Claude 쪽에 닿지 않는다
+        if (!ownerJudge.judge(requestId, request).owner) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Envelope.fail("owner_only"))
+        }
         val docPath = body.doc_path ?: ""
         val question = body.question?.trim() ?: ""
         if (!PathGuard.isSafeMarkdownPath(docPath) || PathGuard.isHidden(docPath) || question.isEmpty()) {

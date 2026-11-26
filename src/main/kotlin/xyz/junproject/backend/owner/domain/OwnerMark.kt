@@ -1,7 +1,11 @@
 package xyz.junproject.backend.owner.domain
 
+import java.security.MessageDigest
 import java.time.Duration
 import java.time.Instant
+import java.util.Base64
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 
 /** 주인이 아닌 까닭 — 로그에는 [word] 만 싣는다 */
 enum class OwnerReason(val word: String) {
@@ -27,18 +31,43 @@ object OwnerMark {
     /** 만든 시각이 지금보다 이만큼까지 앞서도 받는다(어드민과 backend 의 시계 차) — 넘으면 malformed */
     val FUTURE_TOLERANCE: Duration = Duration.ofSeconds(60)
 
+    /** 쿠키 값의 꼴 — 판 · 앞 0 없는 만든 시각 · 서명 43글자 */
+    private val VALUE_PATTERN = Regex("^ow1\\.([1-9][0-9]{0,15})\\.([A-Za-z0-9_-]{43})$")
+    private const val HMAC_ALGORITHM = "HmacSHA256"
+
     /** [createdAtMillis] 에 만든 표시의 서명 — base64url 43글자 */
-    fun signature(secret: String, createdAtMillis: Long): String = TODO("2a")
+    fun signature(secret: String, createdAtMillis: Long): String {
+        val mac = Mac.getInstance(HMAC_ALGORITHM)
+        mac.init(SecretKeySpec(secret.toByteArray(Charsets.UTF_8), HMAC_ALGORITHM))
+        val signedLine = "$PURPOSE\n$VERSION\n$createdAtMillis"
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(mac.doFinal(signedLine.toByteArray(Charsets.UTF_8)))
+    }
 
     /** [createdAtMillis] 에 만든 표시의 쿠키 값 */
-    fun value(secret: String, createdAtMillis: Long): String = TODO("2a")
+    fun value(secret: String, createdAtMillis: Long): String = "$VERSION.$createdAtMillis.${signature(secret, createdAtMillis)}"
 
     /** 쓸 수 있는 열쇠인가 — 공백뿐이 아니고 UTF-8 로 [MIN_SECRET_BYTES] 바이트 이상 */
-    fun usableSecret(secret: String?): Boolean = TODO("2a")
+    fun usableSecret(secret: String?): Boolean =
+        secret != null && secret.isNotBlank() && secret.toByteArray(Charsets.UTF_8).size >= MIN_SECRET_BYTES
 
     /**
      * 요청이 보낸 `study_owner` 쿠키의 값들(없으면 빈 목록)로 판정한다. 차례: 열쇠(no_secret) → 쿠키 없음(no_cookie) →
      * 둘 이상 · 꼴(malformed) → 서명(bad_signature, 상수 시간 비교) → 미래 시각(malformed) → 수명(expired)
      */
-    fun verify(cookieValues: List<String>, secret: String?, now: Instant): OwnerVerdict = TODO("2a")
+    fun verify(cookieValues: List<String>, secret: String?, now: Instant): OwnerVerdict {
+        if (secret == null || !usableSecret(secret)) return notOwner(OwnerReason.NO_SECRET)
+        if (cookieValues.isEmpty()) return notOwner(OwnerReason.NO_COOKIE)
+        if (cookieValues.size > 1) return notOwner(OwnerReason.MALFORMED)
+        val match = VALUE_PATTERN.matchEntire(cookieValues.single()) ?: return notOwner(OwnerReason.MALFORMED)
+        val createdAtMillis = match.groupValues[1].toLongOrNull() ?: return notOwner(OwnerReason.MALFORMED)
+        // 서명은 글자 그대로 상수 시간에 견준다 — 풀어서 바이트로 견주면 마지막 글자의 남는 비트만 다른 값도 같다고 본다
+        val expected = signature(secret, createdAtMillis).toByteArray(Charsets.US_ASCII)
+        if (!MessageDigest.isEqual(expected, match.groupValues[2].toByteArray(Charsets.US_ASCII))) return notOwner(OwnerReason.BAD_SIGNATURE)
+        val createdAt = Instant.ofEpochMilli(createdAtMillis)
+        if (createdAt.isAfter(now.plus(FUTURE_TOLERANCE))) return notOwner(OwnerReason.MALFORMED)
+        if (now.isAfter(createdAt.plus(LIFETIME))) return notOwner(OwnerReason.EXPIRED)
+        return OwnerVerdict(owner = true, reason = null)
+    }
+
+    private fun notOwner(reason: OwnerReason) = OwnerVerdict(owner = false, reason = reason)
 }
