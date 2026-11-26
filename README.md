@@ -95,3 +95,10 @@ Claude 로 가는 경로(`POST /api/chat/escalate` · `POST /api/chat` 의 자�
 - llm 을 부를 때(`/rewrite` · `/chat` — 교체 중 다시 보내는 요청도) 머리글 `X-Request-Id` 에 그 요청의 ID 를 싣는다. 본문의 `request_id` 는 호환으로 그대로 두고 같은 값이다. 꼴이 맞지 않는 값은 머리글에 싣지 않는다(새로 만들지도 않는다).
 - 처리하지 못한 예외의 로그(`unhandled: …`)도 그 요청의 ID 를 쓴다 — 그 요청에서 정한 값, 없으면 꼴이 맞는 들어온 머리글, 아니면 새로 만든 값. 오류 응답의 몸은 그대로다.
 - 싣지 않는 곳: 응답 머리글(nginx 가 낸다) · 임베딩 · 검색 엔진 · Redis(nginx 를 거치지 않는다) · Claude 실행 자리(본문의 `request_id` 가 그 계약이다).
+
+## 의존 서비스 상태
+
+`GET /api/health/dependencies` — 의존 넷(elasticsearch · embedding · redis · postgres)을 병렬로 확인한다(전체 예산 3초 · 항상 200). 기본 헬스(`/actuator/health`)에는 넣지 않는다 — 의존이 죽어도 배포 헬스가 바뀌지 않게.
+
+- 본문: `{"status": "UP"|"DOWN", "components": {<의존>: {"status": "UP"|"DOWN", "took_ms": <정수>|null, "detail"?: <글>}}}` — `detail` 은 DOWN 일 때만(120자까지).
+- `took_ms`: **응답하는 쪽(backend)이 잰 그 확인 하나의 걸린 시간**(단조 시계 · 정수 ms). 그 의존에서 응답을 받았으면 쓸 수 없는 답이어도(200 이 아닌 상태 · ES red · PONG 이 아닌 답 · SQL 오류) 정수다. 응답을 받지 못했거나(연결 거절 · 시간 초과 · 끊김 · 연결을 얻지 못함) 예산을 넘겨 끝을 보지 못했으면 `null`. 칸은 늘 있다.

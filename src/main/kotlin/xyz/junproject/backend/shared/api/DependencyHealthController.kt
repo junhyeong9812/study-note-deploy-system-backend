@@ -1,10 +1,12 @@
 package xyz.junproject.backend.shared.api
 
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.dao.DataAccessResourceFailureException
 import org.springframework.data.redis.core.StringRedisTemplate
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.RestController
+import java.io.IOException
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -34,18 +36,23 @@ class DependencyHealthController(
     @Autowired
     constructor(redis: StringRedisTemplate, studyJdbc: JdbcTemplate) : this(defaultChecks(redis, studyJdbc))
 
-    /** 항상 200 — 어느 것이 안 되는지는 본문의 components 로 알린다(부르는 쪽이 판정한다). */
+    /** 확인 하나의 결과 — [failure] 는 DOWN 의 detail(UP 이면 null), [tookMillis] 는 응답을 받지 못했으면 null */
+    private data class Outcome(val failure: String?, val tookMillis: Long?)
+
+    /** 항상 200 — 어느 것이 안 되는지는 본문의 components 로 알린다(부르는 쪽이 판정한다). 구성 요소마다 그 확인의 걸린 시간 took_ms */
     @GetMapping("/api/health/dependencies")
     fun dependencies(): Map<String, Any> {
         val executor = Executors.newVirtualThreadPerTaskExecutor()
-        val pending = checks.mapValues { (_, check) -> executor.submit<String?> { runCatching(check).exceptionOrNull()?.let(::describe) } }
+        // 시간은 확인을 감싸는 작업 안에서 잰다(단조 시계) — 병렬이라 한 확인의 느림이 다른 칸에 실리지 않는다
+        val pending = checks.mapValues { (_, check) -> executor.submit<Outcome> { measured(check) } }
         executor.shutdown()
         val deadline = System.nanoTime() + budget.toNanos()
         val components = pending.mapValues { (_, future) ->
-            val failure = try {
+            val outcome = try {
                 future.get(maxOf(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS)
-            } catch (_: Exception) { "${budget.seconds}초 안에 응답 없음" }
-            if (failure == null) mapOf("status" to "UP") else mapOf("status" to "DOWN", "detail" to failure)
+            } catch (_: Exception) { Outcome("${budget.seconds}초 안에 응답 없음", tookMillis = null) }   // 끝을 보지 못한 확인
+            if (outcome.failure == null) mapOf("status" to "UP", "took_ms" to outcome.tookMillis)
+            else mapOf("status" to "DOWN", "took_ms" to outcome.tookMillis, "detail" to outcome.failure)
         }
         executor.shutdownNow()   // 예산을 넘긴 확인은 버린다 — 한 대상이 느려도 응답이 늦지 않게
         val allUp = components.values.all { it["status"] == "UP" }
@@ -54,12 +61,24 @@ class DependencyHealthController(
 
     private fun describe(error: Throwable): String = (error.message ?: error.javaClass.simpleName).take(120)
 
+    /** 확인 하나를 돌려 잰다 — 응답을 받지 못한 실패([DependencyUnreachable])는 걸린 시간이 없다 */
+    private fun measured(check: () -> Unit): Outcome {
+        val started = System.nanoTime()
+        val error = runCatching(check).exceptionOrNull()
+        val tookMillis = if (error is DependencyUnreachable) null else (System.nanoTime() - started) / 1_000_000
+        return Outcome(error?.let(::describe), tookMillis)
+    }
+
     companion object {
         private val client: HttpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build()
 
+        /** 받지 못한 실패를 [DependencyUnreachable] 로 — 글은 원래 예외의 것(없으면 종류 이름)이라 detail 이 지금과 같다 */
+        private fun unreachable(error: Exception) = DependencyUnreachable(error.message ?: error.javaClass.simpleName)
+
         private fun expectOk(url: String): String {
             val request = HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(2)).GET().build()
-            val response = client.send(request, HttpResponse.BodyHandlers.ofString())
+            // 연결 거절 · 연결 · 읽기 시간 초과 · 끊김 — 상태 줄을 받지 못했다
+            val response = try { client.send(request, HttpResponse.BodyHandlers.ofString()) } catch (error: IOException) { throw unreachable(error) }
             check(response.statusCode() == 200) { "status ${response.statusCode()}" }
             return response.body()
         }
@@ -79,11 +98,17 @@ class DependencyHealthController(
             },
             "embedding" to { expectOk("$embeddingUrl/health"); Unit },
             "redis" to {
-                val reply = redis.execute { connection -> connection.ping() }
+                val reply = try {
+                    redis.execute { connection -> connection.ping() }
+                } catch (error: DataAccessResourceFailureException) { throw unreachable(error) }   // 연결에 실패 — 답을 받지 못했다
                 check(reply == "PONG") { "ping 응답이 다름: $reply" }
             },
             // 공부 기록 DB — 기본 헬스에는 넣지 않는다(DB 가 죽어도 읽기는 되고 자리 전환이 막히지 않게, 명세 11.1)
-            "postgres" to { studyJdbc.queryForObject("SELECT 1", Int::class.java); Unit },
+            "postgres" to {
+                // 연결을 얻지 못함은 받지 못함 — 서버가 답한 SQL 오류는 응답을 받은 것이다
+                try { studyJdbc.queryForObject("SELECT 1", Int::class.java) } catch (error: DataAccessResourceFailureException) { throw unreachable(error) }
+                Unit
+            },
         )
     }
 }
