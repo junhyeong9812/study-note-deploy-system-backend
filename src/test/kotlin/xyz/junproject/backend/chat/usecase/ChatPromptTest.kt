@@ -119,4 +119,87 @@ class ChatPromptTest {
             .chat("req-prompt-2", SESSION, DOC_PATH, "새 질문", true, clock.now) {}
         assertEquals("$lead\n[문서: $DOC_PATH]\n# 정리\n본문\n\n[이전 대화]\n\n\n[질문]\n새 질문", escalate.prompts.single())
     }
+
+    // ---- 짝 글자(서로게이트 쌍)의 가운데를 자르지 않는다 (명세 §22 ①) ----
+    // 실행 자리는 UTF-8 로 바꿀 수 없는 프롬프트를 422 unencodable_prompt 로 거절한다 — 다 만든 글에 홀로 선 서로게이트가 없어야 한다.
+    // 자르는 끝이 짝의 앞쪽 반이면 한 글자 덜 자른다(상한 이하). 원래 글(질문 · 이력 · 문서)에 홀로 선 서로게이트가 있으면 U+FFFD 로 바꿔 싣는다.
+
+    private val emoji = "🎉"   // 짝 글자 하나 = char 둘
+
+    private fun strictlyEncodable(text: String): Boolean = try {
+        Charsets.UTF_8.newEncoder()
+            .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+            .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+            .encode(java.nio.CharBuffer.wrap(text))
+        true
+    } catch (_: java.nio.charset.CharacterCodingException) {
+        false
+    }
+
+    /** 프롬프트에서 문서의 몫(자름 표시 줄 제외) */
+    private fun documentPartOf(prompt: String, docPath: String = DOC_PATH): String =
+        prompt.substringAfter("[문서: $docPath]\n").substringBefore("\n\n[이전 대화]").removeSuffix("\n$cutNotice")
+
+    @Test
+    fun `문서를 자르는 끝이 짝 글자의 가운데면 한 글자 덜 자른다`() {
+        // 짝이 39,999 · 40,000 번째(1부터)를 차지 → 그대로 40,000자 / 40,000 · 40,001 번째 → 짝을 빼고 39,999자 / 40,001 · 40,002 번째 → 40,000자
+        val cases = mapOf(
+            39_998 to "a".repeat(39_998) + emoji,
+            39_999 to "a".repeat(39_999),
+            40_000 to "a".repeat(40_000),
+        )
+        cases.forEach { (leading, expected) ->
+            val (prompt, _) = promptFor("a".repeat(leading) + emoji + "b".repeat(100))
+            assertNotNull(prompt, "부르지 않았다 ($leading)")
+            assertTrue(strictlyEncodable(prompt!!), "홀로 선 서로게이트가 있다 ($leading)")
+            assertEquals(expected, documentPartOf(prompt), "자른 문서 ($leading)")
+            assertTrue(prompt.contains(cutNotice), "자름 표시가 없다 ($leading)")
+        }
+    }
+
+    @Test
+    fun `나머지 때문에 줄어든 문서의 몫의 경계에서도 짝을 자르지 않고 상한 안이다`() {
+        val longPath = "cs/" + "p".repeat(30_000) + ".md"
+        val (plain, _) = promptFor("x".repeat(100_000), docPath = longPath)
+        val share = documentPartOf(plain!!, longPath).length
+        assertTrue(share in 1 until 40_000, "준비: 몫이 줄지 않았다 $share")
+        val (prompt, _) = promptFor("a".repeat(share - 1) + emoji + "b".repeat(100), docPath = longPath)
+        assertTrue(strictlyEncodable(prompt!!), "홀로 선 서로게이트가 있다")
+        assertEquals("a".repeat(share - 1), documentPartOf(prompt, longPath))
+        assertTrue(prompt.length <= 60_000, "${prompt.length}")
+    }
+
+    @Test
+    fun `이력의 500자 자름도 짝을 자르지 않는다`() {
+        val answers = listOf("a".repeat(499) + emoji + emoji, "a".repeat(498) + emoji + "zz")
+        answers.forEach { answer ->
+            val history = listOf(ObjectMapper().writeValueAsString(mapOf("role" to "assistant", "content" to answer)))
+            val (prompt, _) = promptFor("doc", history = history)
+            assertTrue(strictlyEncodable(prompt!!), "홀로 선 서로게이트가 있다: ${answer.length}")
+            val line = prompt.substringAfter("[이전 대화]\n").substringBefore("\n\n[질문]")
+            val content = line.substringAfter("assistant: ")
+            assertTrue(content.length <= 500, "${content.length}")
+            assertEquals(if (answer.startsWith("a".repeat(499))) "a".repeat(499) else "a".repeat(498) + emoji, content)
+        }
+    }
+
+    @Test
+    fun `원래 글에 홀로 선 서로게이트가 있으면 U+FFFD 로 바꿔 싣고 부른다`() {
+        val lone = "\uD83C"
+        val history = listOf(ObjectMapper().writeValueAsString(mapOf("role" to "user", "content" to "앞${lone}질문")))
+        val (prompt, result) = promptFor("문서${lone}가운데\uDF89끝", question = "질문${lone}", history = history)
+        assertNotNull(prompt, "부르지 않았다: $result")
+        assertTrue(strictlyEncodable(prompt!!), "홀로 선 서로게이트를 그대로 실었다")
+        assertTrue(prompt.contains("문서\uFFFD가운데\uFFFD끝"), "문서의 홀로 선 서로게이트를 바꾸지 않았다")
+        assertTrue(prompt.contains("user: 앞\uFFFD질문"))
+        assertTrue(prompt.endsWith("[질문]\n질문\uFFFD"))
+    }
+
+    @Test
+    fun `질문의 2000자는 자르지 않으므로 짝이 있어도 그대로다`() {
+        val question = "q".repeat(1_998) + emoji
+        val (prompt, _) = promptFor("doc", question = question)
+        assertTrue(prompt!!.endsWith("[질문]\n$question"))
+        assertTrue(strictlyEncodable(prompt))
+    }
 }

@@ -308,4 +308,37 @@ class ChatAutoEscalateTest {
         service(FakeStream(unreachable.behave), escalate).chat("req-auto-4", SESSION, DOC_PATH, QUESTION, true, now) {}
         assertTrue(runLine("req-auto-4").single().contains("duration_ms=42000"), logs.lines.toString())
     }
+
+    // ---- 끊긴 호출의 로그 · 목록에 없는 코드 (명세 §22 ③ · ⑤) ----
+
+    @Test
+    fun `자동 넘김을 기다리다 끊기면 abandoned 한 줄이 남고 이력은 없고 끊김은 그대로 올라간다`() {
+        val redis = EscalateFixtures.FakeRedis()
+        val escalate = runner().also { it.answer = { clock.now = clock.now.plusSeconds(7); throw InterruptedException("client gone") } }
+        val (_, thrown) = run(service(FakeStream(unreachable.behave), escalate, redis), owner = true)
+        assertTrue(thrown is InterruptedException, "$thrown")
+        assertEquals(emptyList<EscalateFixtures.ListCommand>(), redis.commands)
+        val line = runLine("req-auto-1").singleOrNull()
+        assertNotNull(line, "끊긴 호출의 로그가 없다: ${logs.lines}")
+        assertTrue(line!!.startsWith("WARN") && line.contains("result=abandoned") && line.contains("auto=true") && line.contains("duration_ms=7000"), line)
+    }
+
+    @Test
+    fun `단추를 기다리다 끊겨도 abandoned 한 줄이 남는다`() {
+        val escalate = runner().also { it.answer = { throw InterruptedException("client gone") } }
+        val service = ChatService(EscalateFixtures.source(), FakeStream {}, escalate, EscalateFixtures.FakeRedis().redis, logs.requestLog, EscalateFixtures.objectMapper, clock)
+        assertThrows(InterruptedException::class.java) { service.escalateAnswer("req-button-1", SESSION, DOC_PATH, QUESTION) }
+        val line = runLine("req-button-1").singleOrNull()
+        assertNotNull(line, "끊긴 호출의 로그가 없다: ${logs.lines}")
+        assertTrue(line!!.contains("result=abandoned") && line.contains("auto=false") && Regex("duration_ms=\\d+").containsMatchIn(line), line)
+    }
+
+    @Test
+    fun `코드가 없는 rejected 는 로그에 code 칸이 없다`() {
+        val escalate = runner().also { it.answer = { EscalateResult.Refused(EscalateRefusal.REJECTED, null) } }
+        service(FakeStream(unreachable.behave), escalate).chat("req-auto-5", SESSION, DOC_PATH, QUESTION, true, now) {}
+        val line = runLine("req-auto-5").single()
+        assertTrue(line.contains("result=rejected"), line)
+        assertFalse(line.contains("code="), line)
+    }
 }

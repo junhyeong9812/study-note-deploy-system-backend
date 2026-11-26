@@ -328,4 +328,39 @@ class ClaudeRunnerClientTest {
         client("${runner.url}/").ask("req-claude-1", prompt, soon())
         assertEquals("/runs", runner.received.single().path)
     }
+
+    // ---- 코드의 목록 (명세 §22 ③) ----
+
+    @Test
+    fun `rejected 의 코드는 실행 자리의 알려진 목록에 있을 때만 싣는다`() {
+        val known = listOf("unauthorized", "length_required", "bad_length", "invalid_body", "unknown_field", "unknown_purpose",
+            "empty_prompt", "prompt_too_long", "unencodable_prompt", "invalid_request_id", "not_found")
+        known.forEach { code ->
+            assertEquals(EscalateResult.Refused(EscalateRefusal.REJECTED, code), ask(answering(422, failure(code))), code)
+        }
+        listOf("hello", "secret", "process", "prompt_too_long_x", "Unauthorized", "질문").forEach { code ->
+            assertEquals(EscalateResult.Refused(EscalateRefusal.REJECTED, null), ask(answering(422, failure(code))), "목록에 없는 코드($code)를 실었다")
+        }
+        assertEquals(EscalateResult.Refused(EscalateRefusal.REJECTED, null), ask(answering(401, "not json")), "코드가 없는 거절")
+    }
+
+    // ---- 남은 시간은 기다리기 직전에 다시 잰다 (명세 §22 ④) ----
+
+    @Test
+    fun `요청을 만드는 사이 흐른 시간만큼 기다림이 줄어든다`() {
+        // 처음 잴 때는 기한까지 1초가 남았지만 그 뒤로 잴 때마다 950ms 가 흐른 것으로 보이는 시계 — 다시 재면 50ms 만 기다린다
+        val base = Instant.now()
+        val steppingClock = object : java.time.Clock() {
+            private var calls = 0
+            override fun getZone(): java.time.ZoneId = java.time.ZoneOffset.UTC
+            override fun withZone(zone: java.time.ZoneId?): java.time.Clock = this
+            @Synchronized override fun instant(): Instant = base.plusMillis(if (calls++ == 0) 0 else 950)
+        }
+        val runner = FakeRunner { exchange -> Thread.sleep(10_000); send(exchange, 200, success(answer)) }
+        val started = System.nanoTime()
+        val result = ClaudeRunnerClient(runner.url, secret, ObjectMapper(), steppingClock).ask("req-claude-1", prompt, base.plusMillis(1_000))
+        val took = Duration.ofNanos(System.nanoTime() - started).toMillis()
+        assertEquals(EscalateRefusal.TIMEOUT, (result as? EscalateResult.Refused)?.reason, result.toString())
+        assertTrue(took < 700, "기다리기 직전에 다시 재지 않았다: ${took}ms")
+    }
 }
