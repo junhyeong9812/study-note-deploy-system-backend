@@ -43,7 +43,7 @@ class ChatControllerSseTest {
 
     @Test
     fun `SSE 요청이면 대기·시작·토큰·완료가 이벤트로 나간다`() {
-        every { chatService.chat(any(), any(), any(), any(), any()) } answers {
+        every { chatService.chat(any(), any(), any(), any(), any(), any(), any()) } answers {
             val onEvent = lastArg<(ChatEvent) -> Unit>()
             listOf(ChatEvent.Queued(2), ChatEvent.Start, ChatEvent.Token("안녕\n하세요"), ChatEvent.Done)
                 .forEach(onEvent)
@@ -58,7 +58,7 @@ class ChatControllerSseTest {
 
     @Test
     fun `llm 연결 실패는 llm_unreachable 오류 이벤트 - 본문에 글자를 섞지 않는다`() {
-        every { chatService.chat(any(), any(), any(), any(), any()) } throws
+        every { chatService.chat(any(), any(), any(), any(), any(), any(), any()) } throws
             LlmUnreachable(java.net.ConnectException("refused"))
         val body = streamedBody(MediaType.TEXT_EVENT_STREAM_VALUE)
         assertTrue(body.contains("event:error\ndata:{\"code\":\"llm_unreachable\"}"), body)
@@ -67,14 +67,14 @@ class ChatControllerSseTest {
 
     @Test
     fun `그 밖의 실패는 internal 오류 이벤트`() {
-        every { chatService.chat(any(), any(), any(), any(), any()) } throws IllegalStateException("boom")
+        every { chatService.chat(any(), any(), any(), any(), any(), any(), any()) } throws IllegalStateException("boom")
         assertTrue(streamedBody(MediaType.TEXT_EVENT_STREAM_VALUE)
             .contains("event:error\ndata:{\"code\":\"internal\"}"))
     }
 
     @Test
     fun `SSE를 요청하지 않으면 구 계약 - 토큰 글자만 흘린다`() {
-        every { chatService.chat(any(), any(), any(), any(), any()) } answers {
+        every { chatService.chat(any(), any(), any(), any(), any(), any(), any()) } answers {
             val onEvent = lastArg<(ChatEvent) -> Unit>()
             listOf(ChatEvent.Queued(1), ChatEvent.Start, ChatEvent.Token("답"), ChatEvent.Token("끝"), ChatEvent.Done)
                 .forEach(onEvent)

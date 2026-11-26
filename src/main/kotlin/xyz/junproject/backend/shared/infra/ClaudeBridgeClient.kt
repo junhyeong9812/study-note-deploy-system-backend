@@ -13,6 +13,8 @@ class ClaudeBridgeClient(private val objectMapper: tools.jackson.databind.Object
     private val bridgeUrl = System.getenv("CLAUDE_BRIDGE_URL") ?: ""
     private val bridgeSecret = System.getenv("BRIDGE_SECRET") ?: ""
     override val available: Boolean get() = bridgeUrl.isNotBlank()
+    /** 옛 통로로는 자동 넘김을 하지 않는다 — 단추만(명세 §20.3 ③) */
+    override val autoEscalation: Boolean get() = false
 
     private val client by lazy {
         RestClient.builder().baseUrl(bridgeUrl)
@@ -22,8 +24,10 @@ class ClaudeBridgeClient(private val objectMapper: tools.jackson.databind.Object
             }).build()
     }
 
+    override fun ask(requestId: String, prompt: String, deadline: java.time.Instant): xyz.junproject.backend.chat.usecase.EscalateResult = TODO("5a")
+
     @Suppress("UNCHECKED_CAST")
-    override fun ask(requestId: String, prompt: String): String {
+    private fun askOld(requestId: String, prompt: String): String {
         // byte[] 본문 = Content-Length 명시 — Map 본문은 chunked 전송이 되는데
         // 브리지(파이썬 http.server)는 chunked 요청을 못 읽는다 (실측: 0바이트 파싱 오류)
         val payload = objectMapper.writeValueAsBytes(mapOf("prompt" to prompt))

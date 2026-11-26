@@ -50,10 +50,11 @@ class ChatEscalateOwnerTest {
     private var bridgeFails = false
     private val bridge = object : EscalatePort {
         override val available: Boolean get() = bridgeAvailable
-        override fun ask(requestId: String, prompt: String): String {
+        override val autoEscalation: Boolean get() = false
+        override fun ask(requestId: String, prompt: String, deadline: Instant): xyz.junproject.backend.chat.usecase.EscalateResult {
             asked.incrementAndGet()
-            if (bridgeFails) throw RuntimeException("bridge down")
-            return "claude answer"
+            if (bridgeFails) return xyz.junproject.backend.chat.usecase.EscalateResult.Refused(xyz.junproject.backend.chat.usecase.EscalateRefusal.UNAVAILABLE)
+            return xyz.junproject.backend.chat.usecase.EscalateResult.Answered("claude answer", false)
         }
     }
     private val listOperations = mockk<ListOperations<String, String>>(relaxed = true).also {
@@ -162,7 +163,8 @@ class ChatEscalateOwnerTest {
         assertEquals(200, response.status, response.contentAsString)
         assertTrue(response.contentAsString.contains("\"answer\":\"claude answer\""), response.contentAsString)
         assertEquals(1, asked.get())
-        verify(exactly = 2) { listOperations.rightPush(match { key -> key.startsWith("chat:") && key.endsWith(":cs/os/process/2-summary.md") }, any<String>()) }
+        // 질문 · 답 두 줄은 한 명령으로 쓴다(명세 §21-8)
+        verify(exactly = 1) { listOperations.rightPushAll(match { key -> key.startsWith("chat:") && key.endsWith(":cs/os/process/2-summary.md") }, any<String>(), any<String>()) }
     }
 
     @Test

@@ -83,7 +83,7 @@ class ChatController @org.springframework.beans.factory.annotation.Autowired con
 
     /** SSE — 대기(queued)·시작·토큰·오류·완료를 이벤트로. 오류도 이벤트다(본문에 글자를 섞지 않는다). */
     private fun chatEvents(requestId: String, sessionId: String, docPath: String, question: String,
-                           response: HttpServletResponse): SseEmitter {
+                           response: HttpServletResponse, owner: Boolean = false, receivedAt: java.time.Instant = java.time.Instant.now()): SseEmitter {
         response.setHeader("X-Accel-Buffering", "no")     // 엣지 nginx가 이벤트를 모아두지 않게
         response.setHeader("Cache-Control", "no-store")
         response.characterEncoding = "UTF-8"              // 한글 토큰이 응답 기본 문자셋에 깨지지 않게
@@ -120,7 +120,7 @@ class ChatController @org.springframework.beans.factory.annotation.Autowired con
             streamWorker.set(Thread.currentThread())
             if (clientGone.get()) Thread.currentThread().interrupt()   // 등록 전에 온 이탈 신호를 놓치지 않는다
             try {
-                chatService.chat(requestId, sessionId, docPath, question, ::send)
+                chatService.chat(requestId, sessionId, docPath, question, owner, receivedAt, ::send)
                 emitter.complete()
             } catch (gone: ClientGone) {
                 // 던져진 예외가 llm 스트림을 닫는다 → llm이 대기 자리·생성 슬롯을 반납

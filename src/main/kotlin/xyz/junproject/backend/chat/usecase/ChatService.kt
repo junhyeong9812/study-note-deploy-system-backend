@@ -20,11 +20,29 @@ class ChatService(
     private val redis: StringRedisTemplate,
     private val requestLog: RequestLog,
     private val objectMapper: ObjectMapper,
+    /** 넘김의 마감(요청을 받은 때부터 170초) · 단추의 기한(135초)을 재는 시계 — 테스트가 바꾼다 */
+    private val clock: java.time.Clock,
 ) {
+    @org.springframework.beans.factory.annotation.Autowired
+    constructor(source: NoteSourcePort, chatStream: ChatStreamPort, escalate: EscalatePort, redis: StringRedisTemplate,
+                requestLog: RequestLog, objectMapper: ObjectMapper) :
+        this(source, chatStream, escalate, redis, requestLog, objectMapper, java.time.Clock.systemUTC())
+
     companion object {
         const val HISTORY_TURNS = 10          // 모델에 싣는 최근 항목 수 [구현 검증]
         const val DOC_CONTEXT_CHARS = 12_000  // 문서 컨텍스트 상한 [구현 검증]
         val TTL: Duration = Duration.ofDays(7)
+        /** 자동 넘김의 마감 — 요청을 받은 때부터(명세 §20.3) */
+        val AUTO_ESCALATION_DEADLINE: Duration = Duration.ofSeconds(170)
+        /** 마감까지 이보다 적게 남았으면 넘기지 않는다 */
+        val AUTO_ESCALATION_MINIMUM: Duration = Duration.ofSeconds(20)
+        /** 단추의 기한(명세 §20.4) */
+        val BUTTON_DEADLINE: Duration = Duration.ofSeconds(135)
+        /** 프롬프트에 싣는 문서의 상한 · 프롬프트 전체의 상한(실행 자리의 상한 — 명세 §20.2 · §21-6) */
+        const val PROMPT_DOCUMENT_CHARS = 40_000
+        const val PROMPT_CHARS = 60_000
+        /** 문서를 잘랐을 때 붙이는 한 줄 */
+        const val DOCUMENT_CUT_NOTICE = "…(문서가 길어 앞부분만 실었다)"
 
         /** 대화 이력의 키 `chat:{session}:{문서 경로}` — 키 꼴은 여기 한 곳(이력 지우기의 [historyKeyPattern] 도 이것을 쓴다) */
         private const val HISTORY_KEY_PREFIX = "chat:"
@@ -44,7 +62,8 @@ class ChatService(
 
     private fun key(sessionId: String, docPath: String) = historyKey(sessionId, docPath)
 
-    data class ChatMessage(val role: String, val content: String)
+    /** 이력의 항목 — [source] 는 Claude 의 답에만 `"claude"`(로컬의 답 · 질문 · 옛 항목에는 칸이 없다) */
+    data class ChatMessage(val role: String, val content: String, val source: String? = null)
 
     fun history(sessionId: String, docPath: String): List<ChatMessage> =
         redis.opsForList().range(key(sessionId, docPath), 0, -1).orEmpty()
@@ -72,7 +91,13 @@ class ChatService(
 
     /** 스트리밍 응답 — llm 이벤트를 onEvent로 그대로 흘린다.
      * 이력은 답변이 정상 완료(Done)된 경우에만 남긴다 — 대기 중 이탈·오류는 기록하지 않는다. */
+    /**
+     * [owner]: 컨트롤러가 스트림 전에 판정한 주인 여부. [receivedAt]: 요청을 받은 시각(넘김의 마감은 여기서 170초).
+     * 로컬 모델의 첫 시도가 연결 단계에서 실패했고([LlmUnreachable.neverConnected]) 주인이며 자동 넘김을 할 수 있고 20초 이상 남았으면
+     * Claude 로 넘긴다 — escalated → token → (truncated) → done, 거절이면 error(claude_*). 그 밖에는 LlmUnreachable 을 그대로 던진다
+     */
     fun chat(requestId: String, sessionId: String, docPath: String, question: String,
+             owner: Boolean = false, receivedAt: java.time.Instant? = null,
              onEvent: (ChatEvent) -> Unit) {
         val messages = buildMessages(docPath, history(sessionId, docPath), question)
         val answer = StringBuilder()
@@ -85,6 +110,7 @@ class ChatService(
                     is ChatEvent.Done -> completed = true
                     is ChatEvent.Error -> failure = event.code
                     is ChatEvent.Queued, is ChatEvent.Start -> Unit   // 대기 로그는 대기열 소유자(llm)가 남긴다
+                    is ChatEvent.Escalated, is ChatEvent.Truncated -> Unit   // 로컬 모델은 내지 않는다(Claude 로 넘길 때 backend 가 낸다)
                 }
                 onEvent(event)
             }
@@ -101,15 +127,17 @@ class ChatService(
         }
     }
 
-    /** 에스컬레이션 — Claude 브리지(수동 트리거). 전체 문서+이력+질문을 프롬프트로 */
-    fun escalateAnswer(requestId: String, sessionId: String, docPath: String, question: String): String {
+    /** 단추 — 주인 판정 · 검증은 컨트롤러가 한 뒤. 기한 135초. 답이면 이력 두 줄(Claude 의 답에 source) */
+    fun escalateAnswer(requestId: String, sessionId: String, docPath: String, question: String): EscalateResult = TODO("5a")
+
+    private fun escalateAnswerOld(requestId: String, sessionId: String, docPath: String, question: String): String {
         check(escalate.available) { "bridge unavailable" }
         val document = try { source.readFile(docPath) } catch (_: Exception) { "" }
         val historyText = history(sessionId, docPath).takeLast(HISTORY_TURNS)
             .joinToString("\n") { "${it.role}: ${it.content.take(500)}" }
         val prompt = "다음 공부 노트 문서에 대한 질문에 정확하고 간결하게 한국어로 답해줘.\n" +
             "[문서: $docPath]\n$document\n\n[이전 대화]\n$historyText\n\n[질문]\n$question"
-        val answer = escalate.ask(requestId, prompt)
+        val answer = (escalate.ask(requestId, prompt, clock.instant().plus(BUTTON_DEADLINE)) as EscalateResult.Answered).text
         append(sessionId, docPath, ChatMessage("user", question))
         append(sessionId, docPath, ChatMessage("assistant", answer))
         requestLog.log(requestId, "chat escalate ok $docPath answer=${answer.length}chars")
