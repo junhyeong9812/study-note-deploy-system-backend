@@ -14,6 +14,13 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
+ * 그 의존에서 **응답을 받지 못한** 확인의 실패(연결 거절 · 연결 · 읽기 시간 초과 · 연결 끊김) — 걸린 시간 `took_ms` 는 null 이다.
+ * 응답을 받았지만 쓸 수 없는 것(상태 코드가 200 이 아님 · 클러스터 red · 다른 답)은 다른 예외로 던지고 `took_ms` 는 정수다(⑬ T9a).
+ * [message] 는 지금처럼 `detail` 이 된다(120자까지)
+ */
+class DependencyUnreachable(message: String) : RuntimeException(message)
+
+/**
  * 의존 서비스 상태 — ES·임베딩은 이 서버 안에서만 열려 있어 밖(알림 서버)에서 직접 볼 수 없다.
  *
  * actuator 의 헬스 지표로 넣지 않고 별도 경로로 둔다: 지표로 넣으면 기본 `/actuator/health` 합산에 들어가
@@ -62,11 +69,15 @@ class DependencyHealthController(
             check(!Regex(""""status"\s*:\s*"red"""").containsMatchIn(clusterHealthBody)) { "cluster status red" }
         }
 
-        fun defaultChecks(redis: StringRedisTemplate, studyJdbc: JdbcTemplate): Map<String, () -> Unit> = linkedMapOf(
+        fun defaultChecks(
+            redis: StringRedisTemplate, studyJdbc: JdbcTemplate,
+            elasticsearchUrl: String = System.getenv("ES_URL") ?: "http://elasticsearch:9200",
+            embeddingUrl: String = System.getenv("EMBEDDING_URL") ?: "http://embedding:8080",
+        ): Map<String, () -> Unit> = linkedMapOf(
             "elasticsearch" to {
-                requireUsableCluster(expectOk((System.getenv("ES_URL") ?: "http://elasticsearch:9200") + "/_cluster/health"))
+                requireUsableCluster(expectOk("$elasticsearchUrl/_cluster/health"))
             },
-            "embedding" to { expectOk((System.getenv("EMBEDDING_URL") ?: "http://embedding:8080") + "/health"); Unit },
+            "embedding" to { expectOk("$embeddingUrl/health"); Unit },
             "redis" to {
                 val reply = redis.execute { connection -> connection.ping() }
                 check(reply == "PONG") { "ping 응답이 다름: $reply" }

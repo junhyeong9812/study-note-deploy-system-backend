@@ -5,13 +5,21 @@ import org.junit.jupiter.api.Test
 import java.time.Duration
 
 class DependencyHealthControllerTest {
-    private fun components(body: Map<String, Any>) = @Suppress("UNCHECKED_CAST") (body["components"] as Map<String, Map<String, String>>)
+    private fun components(body: Map<String, Any>) = @Suppress("UNCHECKED_CAST") (body["components"] as Map<String, Map<String, Any?>>)
+
+    /** 구성 요소의 칸 가운데 걸린 시간(⑬ T9a — DependencyTookMsTest 가 따로 본다)을 뺀 나머지 — 지금의 칸은 값까지 그대로 견준다 */
+    private fun withoutTookMs(component: Map<String, Any?>?): Map<String, Any?>? {
+        assertTrue(component?.containsKey("took_ms") == true, "took_ms 칸이 없다: $component")
+        return component?.minus("took_ms")
+    }
 
     @Test
     fun `모두 되면 전체와 각 구성 요소가 UP`() {
         val body = DependencyHealthController(mapOf("elasticsearch" to {}, "redis" to {})).dependencies()
         assertEquals("UP", body["status"])
-        assertEquals(mapOf("elasticsearch" to mapOf("status" to "UP"), "redis" to mapOf("status" to "UP")), components(body))
+        assertEquals(setOf("elasticsearch", "redis"), components(body).keys)
+        assertEquals(mapOf("status" to "UP"), withoutTookMs(components(body)["elasticsearch"]))
+        assertEquals(mapOf("status" to "UP"), withoutTookMs(components(body)["redis"]))
     }
 
     @Test
@@ -19,8 +27,8 @@ class DependencyHealthControllerTest {
         val body = DependencyHealthController(mapOf(
             "elasticsearch" to { throw IllegalStateException("status 503") }, "embedding" to {})).dependencies()
         assertEquals("DOWN", body["status"])
-        assertEquals(mapOf("status" to "DOWN", "detail" to "status 503"), components(body)["elasticsearch"])
-        assertEquals(mapOf("status" to "UP"), components(body)["embedding"])
+        assertEquals(mapOf("status" to "DOWN", "detail" to "status 503"), withoutTookMs(components(body)["elasticsearch"]))
+        assertEquals(mapOf("status" to "UP"), withoutTookMs(components(body)["embedding"]))
     }
 
     @Test
