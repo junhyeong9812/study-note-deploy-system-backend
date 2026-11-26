@@ -10,6 +10,8 @@ x-app: &app
     CLAUDE_BRIDGE_URL: ${CLAUDE_BRIDGE_URL:-} # 에스컬레이션 브리지 — 비우면 escalate_unavailable
     BRIDGE_SECRET: ${BRIDGE_SECRET:-}          # 브리지 인증
     OWNER_COOKIE_SECRET: ${OWNER_COOKIE_SECRET:-} # 주인 표시 쿠키의 서명 열쇠(어드민과 같은 값) — 비우면 누구도 주인이 아니다
+    CLAUDE_RUNNER_URL: ${CLAUDE_RUNNER_URL:-}       # Claude 실행 자리 — 비우면 실행 자리 없음(자동 넘김 없음)
+    CLAUDE_RUNNER_SECRET: ${CLAUDE_RUNNER_SECRET:-} # 실행 자리의 호출용 비밀값과 같은 값
     LOG_REDIS_URL: redis://redis:6379
     SERVER_NAME: backend
     SYNC_SECRET: ${SYNC_SECRET:?set-in-env}

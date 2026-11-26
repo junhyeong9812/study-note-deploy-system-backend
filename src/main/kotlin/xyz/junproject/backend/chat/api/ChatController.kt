@@ -12,6 +12,8 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter
 import tools.jackson.databind.ObjectMapper
 import xyz.junproject.backend.chat.usecase.ChatEvent
 import xyz.junproject.backend.chat.usecase.ChatService
+import xyz.junproject.backend.chat.usecase.EscalateRefusal
+import xyz.junproject.backend.chat.usecase.EscalateResult
 import xyz.junproject.backend.chat.usecase.LlmUnreachable
 import xyz.junproject.backend.content.domain.PathGuard
 import xyz.junproject.backend.shared.api.Envelope
@@ -31,7 +33,7 @@ data class ChatIn(val doc_path: String? = null, val question: String? = null)
 class ChatController @org.springframework.beans.factory.annotation.Autowired constructor(
     private val chatService: ChatService, private val requestLog: RequestLog,
     private val objectMapper: ObjectMapper,
-    /** Claude 로 가는 경로(`/escalate`)의 주인 판정 */
+    /** Claude 로 가는 경로(`/escalate` · SSE 의 자동 넘김)의 주인 판정 */
     private val ownerJudge: xyz.junproject.backend.owner.usecase.OwnerJudge,
 ) {
     /** 주인 판정 없이 만든 것 — 열쇠가 없는 판정(누구도 주인이 아니다)을 쓴다 */
@@ -66,6 +68,7 @@ class ChatController @org.springframework.beans.factory.annotation.Autowired con
              request: HttpServletRequest, response: HttpServletResponse,
              @RequestHeader("X-Request-Id", required = false) incomingId: String?,
              @RequestHeader("Accept", required = false) accept: String?): Any {
+        val receivedAt = java.time.Instant.now()   // 자동 넘김의 마감(170초)은 여기서부터
         val requestId = requestLog.acceptOrIssue(incomingId)
         val docPath = body.doc_path ?: ""
         val question = body.question?.trim() ?: ""
@@ -76,14 +79,16 @@ class ChatController @org.springframework.beans.factory.annotation.Autowired con
                 .body(Envelope.fail("invalid_request", detail = "doc_path(.md)·question(1~2000자)"))
         }
         val sessionId = sessionOf(request, response)
-        return if (accept?.contains(MediaType.TEXT_EVENT_STREAM_VALUE) == true)
-            chatEvents(requestId, sessionId, docPath, question, response)
-        else chatPlainText(requestId, sessionId, docPath, question)
+        return if (accept?.contains(MediaType.TEXT_EVENT_STREAM_VALUE) == true) {
+            // 주인은 스트림을 시작하기 전에 요청의 쿠키로 판정해 참/거짓만 넘긴다(서비스는 요청을 모른다)
+            val owner = ownerJudge.judge(requestId, request).owner
+            chatEvents(requestId, sessionId, docPath, question, response, owner, receivedAt)
+        } else chatPlainText(requestId, sessionId, docPath, question)   // 옛 계약의 글자 흐름은 넘기지 않는다
     }
 
     /** SSE — 대기(queued)·시작·토큰·오류·완료를 이벤트로. 오류도 이벤트다(본문에 글자를 섞지 않는다). */
     private fun chatEvents(requestId: String, sessionId: String, docPath: String, question: String,
-                           response: HttpServletResponse, owner: Boolean = false, receivedAt: java.time.Instant = java.time.Instant.now()): SseEmitter {
+                           response: HttpServletResponse, owner: Boolean, receivedAt: java.time.Instant): SseEmitter {
         response.setHeader("X-Accel-Buffering", "no")     // 엣지 nginx가 이벤트를 모아두지 않게
         response.setHeader("Cache-Control", "no-store")
         response.characterEncoding = "UTF-8"              // 한글 토큰이 응답 기본 문자셋에 깨지지 않게
@@ -126,9 +131,14 @@ class ChatController @org.springframework.beans.factory.annotation.Autowired con
                 // 던져진 예외가 llm 스트림을 닫는다 → llm이 대기 자리·생성 슬롯을 반납
                 requestLog.log(requestId, "chat client gone")
                 emitter.completeWithError(gone)
+            } catch (gone: InterruptedException) {
+                // Claude 를 기다리다 브라우저가 떠났다 — 호출은 끊었고 이력은 쓰지 않았다
+                requestLog.log(requestId, "chat client gone while waiting for claude")
+                emitter.completeWithError(gone)
             } catch (error: Exception) {
                 val code = if (error is LlmUnreachable) "llm_unreachable" else "internal"
-                requestLog.log(requestId, "chat failed($code): ${error.message?.take(150)}", "error")
+                // 예외의 글은 남기지 않는다 — 질문 · 답 · 문서가 섞일 수 있다(종류만)
+                requestLog.log(requestId, "chat failed($code): ${error.javaClass.simpleName}", "error")
                 runCatching { send(ChatEvent.Error(code)) }
                 emitter.complete()                // complete 누락 = 연결·스레드 누수 (비교 문서 §4)
             } finally {
@@ -155,7 +165,7 @@ class ChatController @org.springframework.beans.factory.annotation.Autowired con
                 }
                 emitter.complete()
             } catch (error: Exception) {
-                requestLog.log(requestId, "chat failed: ${error.message?.take(150)}", "error")
+                requestLog.log(requestId, "chat failed: ${error.javaClass.simpleName}", "error")
                 runCatching { emitter.send(failureText, UTF8_TEXT) }
                 emitter.completeWithError(error)
             }
@@ -173,7 +183,7 @@ class ChatController @org.springframework.beans.factory.annotation.Autowired con
         }
         val sessionId = sessionOf(request, response)
         val items = chatService.history(sessionId, doc_path)
-            .map { mapOf("role" to it.role, "content" to it.content) }
+            .map { message -> buildMap { put("role", message.role); put("content", message.content); message.source?.let { put("source", it) } } }
         return ResponseEntity.ok(Envelope.ok(mapOf("messages" to items)))
     }
 
@@ -189,20 +199,31 @@ class ChatController @org.springframework.beans.factory.annotation.Autowired con
         }
         val docPath = body.doc_path ?: ""
         val question = body.question?.trim() ?: ""
-        if (!PathGuard.isSafeMarkdownPath(docPath) || PathGuard.isHidden(docPath) || question.isEmpty()) {
+        if (!PathGuard.isSafeMarkdownPath(docPath) || PathGuard.isHidden(docPath) || question.isEmpty() || question.length > 2000) {
             return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
                 .body(Envelope.fail("invalid_request"))
         }
         val sessionId = sessionOf(request, response)
-        return try {
-            val answer = chatService.escalateAnswer(requestId, sessionId, docPath, question)
-            ResponseEntity.ok(Envelope.ok(mapOf("answer" to answer)))
+        val result = try {
+            chatService.escalateAnswer(requestId, sessionId, docPath, question)
         } catch (error: IllegalStateException) {
-            ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-                .body(Envelope.fail("escalate_unavailable", detail = "브리지 미연결(PC 오프라인?)"))
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(Envelope.fail("escalate_unavailable", detail = "Claude 연결 설정 없음"))
         } catch (error: Exception) {
-            requestLog.log(requestId, "escalate failed: ${error.message?.take(150)}", "error")
-            ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(Envelope.fail("escalate_failed"))
+            requestLog.log(requestId, "escalate failed: ${error.javaClass.simpleName}", "error")
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(Envelope.fail("escalate_failed"))
+        }
+        // 실행 자리의 코드는 응답에 싣지 않는다(로그에만)
+        return when (result) {
+            is EscalateResult.Answered -> ResponseEntity.ok(Envelope.ok(mapOf("answer" to result.text, "truncated" to result.truncated)))
+            is EscalateResult.Refused -> when (result.reason) {
+                EscalateRefusal.BUSY -> ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).body(Envelope.fail("claude_busy"))
+                EscalateRefusal.LIMIT_REACHED -> ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).body(Envelope.fail("claude_limit"))
+                EscalateRefusal.DISABLED -> ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).body(Envelope.fail("claude_disabled"))
+                EscalateRefusal.TIMEOUT -> ResponseEntity.status(HttpStatus.GATEWAY_TIMEOUT).body(Envelope.fail("claude_timeout"))
+                EscalateRefusal.UNAVAILABLE, EscalateRefusal.REJECTED ->
+                    ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(Envelope.fail("escalate_failed"))
+            }
         }
     }
 }
