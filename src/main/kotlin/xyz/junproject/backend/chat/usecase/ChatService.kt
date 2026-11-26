@@ -178,11 +178,17 @@ class ChatService(
             return EscalateResult.Refused(EscalateRefusal.UNAVAILABLE)
         }
         val prompt = promptOf(docPath, document, history(sessionId, docPath), question) ?: run {
-            requestLog.log(requestId, "claude not run: prompt over $PROMPT_CHARS chars auto=$auto", "error")
+            requestLog.log(requestId, "claude not run: prompt over $PROMPT_CHARS chars or not encodable auto=$auto", "error")
             return EscalateResult.Refused(EscalateRefusal.REJECTED)
         }
         val startedAt = clock.instant()
-        val result = escalate.ask(requestId, prompt, deadline)
+        val result = try {
+            escalate.ask(requestId, prompt, deadline)
+        } catch (gone: InterruptedException) {
+            // 기다리다 끊겼다 — 실행 자리의 한도는 쓰였을 수 있다(사용량을 맞춰 볼 때 빠지지 않게 한 줄). 이력은 쓰지 않는다
+            requestLog.log(requestId, "claude run: result=abandoned auto=$auto duration_ms=${Duration.between(startedAt, clock.instant()).toMillis()}", "warning")
+            throw gone
+        }
         val durationMillis = Duration.between(startedAt, clock.instant()).toMillis()
         if (result is EscalateResult.Answered) {
             appendExchange(sessionId, docPath, ChatMessage("user", question), ChatMessage("assistant", result.text, CLAUDE_SOURCE))
@@ -193,18 +199,56 @@ class ChatService(
 
     /**
      * 프롬프트 — 안내 · `[문서: 경로]` · 문서 · `[이전 대화]` · 이력 · `[질문]` · 질문. 문서를 뺀 나머지를 먼저 만들고 문서의 몫을 정한다:
-     * min([PROMPT_DOCUMENT_CHARS], [PROMPT_CHARS] − 나머지 − 자름 표시). 나머지만으로 넘치면 null(부르지 않는다)
+     * min([PROMPT_DOCUMENT_CHARS], [PROMPT_CHARS] − 나머지 − 자름 표시). 나머지만으로 넘치면 null(부르지 않는다).
+     * 실행 자리는 UTF-8 로 바꿀 수 없는 프롬프트를 거절한다 — 원래 글의 홀로 선 서로게이트는 U+FFFD 로 바꾸고, 자르는 끝은 짝 글자의 가운데를 피한다
      */
     private fun promptOf(docPath: String, document: String, historyItems: List<ChatMessage>, question: String): String? {
-        val historyText = historyItems.takeLast(HISTORY_TURNS).joinToString("\n") { "${it.role}: ${it.content.take(500)}" }
-        val head = "$PROMPT_LEAD\n[문서: $docPath]\n"
-        val tail = "\n\n[이전 대화]\n$historyText\n\n[질문]\n$question"
+        val historyText = historyItems.takeLast(HISTORY_TURNS)
+            .joinToString("\n") { "${encodable(it.role)}: ${takeWhole(encodable(it.content), 500)}" }
+        val head = "$PROMPT_LEAD\n[문서: ${encodable(docPath)}]\n"
+        val tail = "\n\n[이전 대화]\n$historyText\n\n[질문]\n${encodable(question)}"
         val cutLine = "\n$DOCUMENT_CUT_NOTICE"
         val documentShare = minOf(PROMPT_DOCUMENT_CHARS, PROMPT_CHARS - head.length - tail.length - cutLine.length)
         if (documentShare < 0) return null
-        // 단순화: 자르는 자리는 글자(UTF-16) 단위 — 문서의 4만 자째가 이모지 같은 짝 글자의 가운데면 반쪽이 남는다. 생기면 짝을 피해 자른다
-        val documentPart = if (document.length <= documentShare) document else document.take(documentShare) + cutLine
-        return (head + documentPart + tail).takeIf { it.length <= PROMPT_CHARS }
+        val cleanDocument = encodable(document)
+        val documentPart = if (cleanDocument.length <= documentShare) cleanDocument else takeWhole(cleanDocument, documentShare) + cutLine
+        return (head + documentPart + tail).takeIf { it.length <= PROMPT_CHARS && strictlyEncodable(it) }
+    }
+
+    /** 홀로 선 서로게이트(짝이 없는 반쪽)를 U+FFFD 로 — 그대로 실으면 UTF-8 로 바꿀 수 없다 */
+    private fun encodable(text: String): String {
+        if (text.none { Character.isSurrogate(it) }) return text
+        val builder = StringBuilder(text.length)
+        var index = 0
+        while (index < text.length) {
+            val character = text[index]
+            if (Character.isHighSurrogate(character) && index + 1 < text.length && Character.isLowSurrogate(text[index + 1])) {
+                builder.append(character).append(text[index + 1])
+                index += 2
+                continue
+            }
+            builder.append(if (Character.isSurrogate(character)) '\uFFFD' else character)
+            index++
+        }
+        return builder.toString()
+    }
+
+    /** 앞에서 [limit] 글자(UTF-16)까지 — 끝이 짝 글자의 앞쪽 반이면 한 글자 덜(짝을 가르지 않는다) */
+    private fun takeWhole(text: String, limit: Int): String {
+        if (text.length <= limit) return text
+        val end = if (limit > 0 && Character.isHighSurrogate(text[limit - 1])) limit - 1 else limit
+        return text.substring(0, end)
+    }
+
+    /** 엄격하게 UTF-8 로 바꿀 수 있는가 — 방어선(위의 둘이 맞으면 언제나 참) */
+    private fun strictlyEncodable(text: String): Boolean = try {
+        Charsets.UTF_8.newEncoder()
+            .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+            .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+            .encode(java.nio.CharBuffer.wrap(text))
+        true
+    } catch (_: java.nio.charset.CharacterCodingException) {
+        false
     }
 
     /** `claude run: result=<낱말> auto=<참거짓> duration_ms=<수>`(+ truncated=true · code=) — 답은 info · rejected 는 error · 그 밖의 거절은 warning */

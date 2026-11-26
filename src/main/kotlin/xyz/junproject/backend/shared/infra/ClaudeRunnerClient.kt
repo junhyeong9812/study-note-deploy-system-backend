@@ -59,9 +59,12 @@ class ClaudeRunnerClient(
             .POST(HttpRequest.BodyPublishers.ofByteArray(body))
             .build()
         val call = client.sendAsync(request, HttpResponse.BodyHandlers.ofByteArray())
+        // 남은 시간은 기다리기 직전에 다시 잰다 — 요청을 만드는 데 든 시간만큼 마감을 넘기지 않게
+        val waiting = Duration.between(clock.instant(), deadline)
         val response = try {
             // 기한은 호출 전체의 절대 마감 — 연결 · 머리글 · 몸을 다 받는 데까지
-            call.get(remaining.toNanos(), TimeUnit.NANOSECONDS)
+            if (waiting.isNegative || waiting.isZero) throw TimeoutException()
+            call.get(waiting.toNanos(), TimeUnit.NANOSECONDS)
         } catch (timeout: TimeoutException) {
             call.cancel(true)
             return EscalateResult.Refused(EscalateRefusal.TIMEOUT)
@@ -90,7 +93,7 @@ class ClaudeRunnerClient(
             return EscalateResult.Refused(EscalateRefusal.UNAVAILABLE)
         }
         val code = envelope?.takeIf { it.isObject }?.path("error")?.path("code")
-            ?.takeIf { it.isString }?.stringValue()?.takeIf { RUNNER_CODE.matches(it) }
+            ?.takeIf { it.isString }?.stringValue()
         return when (status) {
             429 -> EscalateResult.Refused(when (code) {
                 "busy" -> EscalateRefusal.BUSY
@@ -99,7 +102,7 @@ class ClaudeRunnerClient(
                 else -> EscalateRefusal.UNAVAILABLE
             })
             504 -> EscalateResult.Refused(EscalateRefusal.TIMEOUT)
-            in BACKEND_FAULT_STATUSES -> EscalateResult.Refused(EscalateRefusal.REJECTED, code)
+            in BACKEND_FAULT_STATUSES -> EscalateResult.Refused(EscalateRefusal.REJECTED, code?.takeIf { it in KNOWN_REJECTION_CODES })
             else -> EscalateResult.Refused(EscalateRefusal.UNAVAILABLE)
         }
     }
@@ -109,7 +112,10 @@ class ClaudeRunnerClient(
         const val PURPOSE = "chat"
         /** backend 의 설정 · 코드가 틀렸다는 답 — 비밀값 불일치 · 몸의 길이 · 프롬프트 초과 · 경로 */
         private val BACKEND_FAULT_STATUSES = setOf(400, 401, 404, 411, 413, 422)
-        /** 로그에 싣는 실행 자리의 코드 — 고정 낱말의 꼴만(다른 글자가 로그로 새지 않게) */
-        private val RUNNER_CODE = Regex("^[a-z][a-z0-9_]{0,63}$")
+        /** 로그에 싣는 실행 자리의 코드 — 실행 자리의 계약에 있는 낱말만(그 밖의 글자는 로그로 새지 않게 싣지 않는다) */
+        private val KNOWN_REJECTION_CODES = setOf(
+            "unauthorized", "length_required", "bad_length", "invalid_body", "unknown_field", "unknown_purpose",
+            "empty_prompt", "prompt_too_long", "unencodable_prompt", "invalid_request_id", "not_found",
+        )
     }
 }
