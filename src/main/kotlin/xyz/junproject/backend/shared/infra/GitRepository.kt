@@ -63,9 +63,10 @@ class GitRepository : SourceControlPort, NoteSourcePort, DocumentReader {
                 CommitInfo(sha = parts[0], at = parts.getOrElse(1) { "" }, message = parts.getOrElse(2) { "" })
             }
 
+    /** 판 표시는 커밋으로 묶어(`^{commit}`) 읽는다 — 폴더의 tree · 글의 blob id 를 판으로 주면 그 안의 숨김 글이 읽히기 때문이다 */
     override fun readFileAt(sha: String, path: String): String =
         try {
-            run("git", "-c", "core.quotepath=off", "show", "$sha:$path")
+            run("git", "-c", "core.quotepath=off", "show", "$sha^{commit}:$path")
         } catch (error: IllegalStateException) {
             throw java.io.FileNotFoundException("$sha:$path")   // 부재·잘못된 sha → 404 계약
         }
