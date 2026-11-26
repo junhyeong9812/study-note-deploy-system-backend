@@ -86,3 +86,11 @@ Claude 로 가는 경로(`POST /api/chat/escalate` · `POST /api/chat` 의 자�
 - 한계: 브라우저가 떠나면 기다리던 호출을 끊지만 실행 자리의 실행은 끝까지 돌 수 있다 — 한도 하나를 쓴다. 떠난 것을 아는 데는 **약 30초**가 걸린다 — keep-alive 는 15초마다지만 떠난 직후의 첫 keep-alive 는 버퍼에 들어가 성공하고, 그다음 것이 실패한다(실측 30.06초). 끊긴 호출은 `claude run: result=abandoned auto=… duration_ms=…`(warning) 한 줄을 남기고 이력은 쓰지 않는다.
 - `rejected` 의 `code=` 는 실행 자리의 알려진 코드(`unauthorized` · `length_required` · `bad_length` · `invalid_body` · `unknown_field` · `unknown_purpose` · `empty_prompt` · `prompt_too_long` · `unencodable_prompt` · `invalid_request_id` · `not_found`)일 때만 쓴다 — 그 밖의 코드는 칸 자체를 쓰지 않는다.
 - 짝 글자: 실행 자리는 UTF-8 로 바꿀 수 없는 프롬프트를 거절한다(422 `unencodable_prompt`). 그래서 문서(4만 자) · 이력(500자)을 자르는 끝이 짝 글자(이모지 등)의 가운데면 한 글자 덜 자르고, 원래 글(질문 · 이력 · 문서)에 짝이 없는 반쪽(홀로 선 서로게이트)이 있으면 U+FFFD 로 바꿔 싣는다.
+
+## 로그 · 요청 ID
+
+로그 한 줄은 `<요청 ID>:backend:<내용>` 이다. 요청 ID(추적의 ID)의 꼴은 `^[A-Za-z0-9_-]{1,64}$`(정규식은 `RequestLog` 한 곳) — 들어온 `X-Request-Id` 가 이 꼴이면 그 값을, 아니면 backend 가 새로 만든다(`RequestLog.acceptOrIssue`).
+
+- llm 을 부를 때(`/rewrite` · `/chat` — 교체 중 다시 보내는 요청도) 머리글 `X-Request-Id` 에 그 요청의 ID 를 싣는다. 본문의 `request_id` 는 호환으로 그대로 두고 같은 값이다. 꼴이 맞지 않는 값은 머리글에 싣지 않는다(새로 만들지도 않는다).
+- 처리하지 못한 예외의 로그(`unhandled: …`)도 그 요청의 ID 를 쓴다 — 그 요청에서 정한 값, 없으면 꼴이 맞는 들어온 머리글, 아니면 새로 만든 값. 오류 응답의 몸은 그대로다.
+- 싣지 않는 곳: 응답 머리글(nginx 가 낸다) · 임베딩 · 검색 엔진 · Redis(nginx 를 거치지 않는다) · Claude 실행 자리(본문의 `request_id` 가 그 계약이다).

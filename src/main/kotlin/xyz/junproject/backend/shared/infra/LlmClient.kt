@@ -29,6 +29,8 @@ class LlmClient(private val requestLog: RequestLog, llmUrl: String) : QueryRewri
     override fun rewrite(requestId: String, query: String): RewriteOutcome = try {
         val response = client.post().uri("/rewrite")
             .header("Content-Type", "application/json")
+            // 추적 ID 를 머리글로도 — 꼴이 맞을 때만(머리글 주입을 막는다). 본문의 request_id 는 호환으로 그대로
+            .headers { headers -> if (RequestLog.isRequestId(requestId)) headers.set(RequestLog.REQUEST_ID_HEADER, requestId) }
             .body(mapOf("request_id" to requestId, "query" to query))
             .retrieve().body(Map::class.java)
         val data = response?.get("data") as? Map<String, Any?>

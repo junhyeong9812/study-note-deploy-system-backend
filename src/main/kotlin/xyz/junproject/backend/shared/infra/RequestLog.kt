@@ -18,12 +18,29 @@ class RequestLog(private val redis: StringRedisTemplate) {
 
     fun newRequestId(): String = "req-" + java.util.UUID.randomUUID().toString().take(12)
 
-    /** 인입 requestId 검증 — 규약 포맷(콜론 구분)을 깨는 값이면 재발행 (B11) */
-    fun acceptOrIssue(incoming: String?): String =
-        if (incoming != null && incoming.matches(Regex("^[A-Za-z0-9_-]{1,64}$"))) incoming
-        else newRequestId()
+    /**
+     * 인입 requestId 검증 — 규약 포맷(콜론 구분)을 깨는 값이면 재발행 (B11).
+     * 정한 값을 요청 범위([REQUEST_ID_ATTRIBUTE])에 남긴다 — 처리하지 못한 예외의 로그도 같은 ID 를 쓰게(요청 밖에서 부르면 남기지 않는다)
+     */
+    fun acceptOrIssue(incoming: String?): String {
+        val requestId = if (isRequestId(incoming)) incoming!! else newRequestId()
+        org.springframework.web.context.request.RequestContextHolder.getRequestAttributes()?.setAttribute(
+            REQUEST_ID_ATTRIBUTE, requestId, org.springframework.web.context.request.RequestAttributes.SCOPE_REQUEST)
+        return requestId
+    }
 
     fun formatLine(requestId: String, message: String) = "$requestId:$serverName:$message"
+
+    companion object {
+        /** 추적 ID 의 꼴(통신 규약 §1.2) — 로그 한 줄의 구분자 `:` · 줄바꿈이 들 수 없다. 이 꼴을 쓰는 곳은 모두 이것을 쓴다 */
+        private val REQUEST_ID = Regex("^[A-Za-z0-9_-]{1,64}$")
+        /** 그 요청에서 정한 추적 ID 를 남기는 요청 속성의 이름 */
+        const val REQUEST_ID_ATTRIBUTE = "xyz.junproject.backend.requestId"
+        /** 다른 서비스에 추적 ID 를 싣는 머리글 */
+        const val REQUEST_ID_HEADER = "X-Request-Id"
+
+        fun isRequestId(value: String?): Boolean = value != null && REQUEST_ID.matches(value)
+    }
 
     fun log(requestId: String, message: String, level: String = "info") {
         val line = formatLine(requestId, message)
