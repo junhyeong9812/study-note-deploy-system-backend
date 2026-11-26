@@ -14,4 +14,10 @@ object PathGuard {
 
     /** 최상위 세그먼트가 denylist면 숨김. 루트 직속 파일(index.md 등)은 세그먼트=파일명이라 비대상. */
     fun isHidden(path: String): Boolean = path.substringBefore("/") in HIDDEN_TOP_LEVEL
+
+    /**
+     * 실습 경로 — 폴더 조각 가운데 둘째 이후의 것이 정확히 `practice` 인 경로(주제 폴더 안의 `practice/` 아래 · 명세 ⑭ §10 · §11 P3a).
+     * 최상위 `practice/` 는 기존 글의 자리라 아니다. 파일 이름 `practice.md` 도 아니다
+     */
+    fun isPracticePath(path: String): Boolean = TODO("P3a")
 }
