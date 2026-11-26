@@ -28,8 +28,15 @@ data class ChatIn(val doc_path: String? = null, val question: String? = null)
 /** 채팅 API — 세션 쿠키(id만, HttpOnly) 발급/검증은 여기(중앙 발급 규약). 스트림은 MVC 비동기. */
 @RestController
 @RequestMapping("/api/chat")
-class ChatController(private val chatService: ChatService, private val requestLog: RequestLog,
-                     private val objectMapper: ObjectMapper) {
+class ChatController @org.springframework.beans.factory.annotation.Autowired constructor(
+    private val chatService: ChatService, private val requestLog: RequestLog,
+    private val objectMapper: ObjectMapper,
+    /** Claude 로 가는 경로(`/escalate`)의 주인 판정 */
+    private val ownerJudge: xyz.junproject.backend.owner.usecase.OwnerJudge,
+) {
+    /** 주인 판정 없이 만든 것 — 열쇠가 없는 판정(누구도 주인이 아니다)을 쓴다 */
+    constructor(chatService: ChatService, requestLog: RequestLog, objectMapper: ObjectMapper) :
+        this(chatService, requestLog, objectMapper, xyz.junproject.backend.owner.usecase.OwnerJudge(null, java.time.Clock.systemUTC(), requestLog))
 
     // 가상 스레드 — 대기열에 선 연결(최대 2+8)을 플랫폼 스레드 없이 붙잡는다. 동시 수 상한은 llm 대기열이 소유
     private val streamExecutor = Executors.newVirtualThreadPerTaskExecutor()

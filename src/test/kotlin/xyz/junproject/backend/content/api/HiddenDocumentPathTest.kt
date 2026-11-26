@@ -93,6 +93,14 @@ class HiddenDocumentPathTest {
         MockMvcBuilders.standaloneSetup(ContentController(source, mockk(relaxed = true), requestLog))
             .setControllerAdvice(GlobalErrorHandler(requestLog)).build()
     }
+    /** 주인 표시 — 열쇠 [ownerSecret] 로 1764000000000 에 만든 값(OwnerMarkTest 의 벡터) */
+    private val ownerSecret = "0123456789abcdef0123456789abcdef"
+    private val ownerMarkValue = "ow1.1764000000000.SsdDQjHHXxd2qHi5SeD58PoS0zumVJNEKlcZgUAgM54"
+    private val ownerChatMvc by lazy {
+        val judge = xyz.junproject.backend.owner.usecase.OwnerJudge(
+            ownerSecret, java.time.Clock.fixed(java.time.Instant.ofEpochMilli(1_764_000_000_000L).plusSeconds(60), java.time.ZoneOffset.UTC), requestLog)
+        MockMvcBuilders.standaloneSetup(ChatController(chatService, requestLog, ObjectMapper(), judge)).build()
+    }
     private val chatMvc by lazy {
         MockMvcBuilders.standaloneSetup(ChatController(chatService, requestLog, ObjectMapper())).build()
     }
@@ -160,7 +168,9 @@ class HiddenDocumentPathTest {
             val body = ObjectMapper().writeValueAsString(mapOf("doc_path" to path, "question" to "what is the plan?"))
             val chat = chatMvc.perform(post("/api/chat").contentType(MediaType.APPLICATION_JSON).content(body)).andReturn().response
             assertRejectedWithoutSecret(chat, "/api/chat doc_path=$path")
-            val escalate = chatMvc.perform(post("/api/chat/escalate").contentType(MediaType.APPLICATION_JSON).content(body)).andReturn().response
+            // Claude 로 가는 길은 주인만 지난다 — 주인의 요청으로도 숨김 글을 가리키는 경로는 형식에서 거절된다
+            val escalate = ownerChatMvc.perform(post("/api/chat/escalate").contentType(MediaType.APPLICATION_JSON).content(body)
+                .cookie(jakarta.servlet.http.Cookie(xyz.junproject.backend.owner.api.OwnerCookie.NAME, ownerMarkValue))).andReturn().response
             assertRejectedWithoutSecret(escalate, "/api/chat/escalate doc_path=$path")
             val history = chatMvc.perform(get(URI.create("/api/chat/history?doc_path=${encoded(path)}"))).andReturn().response
             assertRejectedWithoutSecret(history, "/api/chat/history doc_path=$path")
