@@ -12,9 +12,13 @@ import java.time.Duration
 
 /** llm wrapper /rewrite 호출 — 실패는 전부 "생략 폴백"(검색이 LLM에 인질로 잡히지 않는다). */
 @Component
-class LlmClient(private val requestLog: RequestLog) : QueryRewritePort {
+class LlmClient(private val requestLog: RequestLog, llmUrl: String) : QueryRewritePort {
+    /** 운영의 주소 — 테스트는 가짜 llm 의 주소를 준다 */
+    @org.springframework.beans.factory.annotation.Autowired
+    constructor(requestLog: RequestLog) : this(requestLog, System.getenv("LLM_URL") ?: "http://llm:8000")
+
     private val client = RestClient.builder()
-        .baseUrl(System.getenv("LLM_URL") ?: "http://llm:8000")
+        .baseUrl(llmUrl)
         .requestFactory(SimpleClientHttpRequestFactory().apply {
             setConnectTimeout(Duration.ofSeconds(2))
             setReadTimeout(Duration.ofSeconds(7))   // wrapper 총예산 5s + 여유
