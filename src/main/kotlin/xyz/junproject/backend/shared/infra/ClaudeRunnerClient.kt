@@ -40,7 +40,7 @@ class ClaudeRunnerClient(
 
     /**
      * 호출마다 새 클라이언트 — 끝나면 닫는다. 시간 초과 · 끊김에서는 `shutdownNow()` 로 연결을 실제로 닫는다
-     * (`CompletableFuture.cancel(true)` 만으로는 데워지지 않은 JVM 의 첫 호출에서 연결이 닫히지 않았다). 실행 자리는 동시에 한 건이고 호출이 드물다
+     * (닫는 것을 `CompletableFuture.cancel(true)` 가 전해 주는 데에만 기대지 않는다). 실행 자리는 동시에 한 건이고 호출이 드물다 — 호출 하나에 덧붙는 시간은 1ms 안쪽
      */
     private fun newClient(): HttpClient = HttpClient.newBuilder()
         .connectTimeout(connectTimeout)
