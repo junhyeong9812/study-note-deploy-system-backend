@@ -38,13 +38,15 @@ class ClaudeRunnerClient(
     /** 실행 자리가 설정돼 있으면 자동 넘김을 할 수 있다 */
     override val autoEscalation: Boolean get() = available
 
-    private val client: HttpClient by lazy {
-        HttpClient.newBuilder()
-            .connectTimeout(connectTimeout)
-            .followRedirects(HttpClient.Redirect.NEVER)   // 비밀값이 다른 곳으로 가지 않게
-            .version(HttpClient.Version.HTTP_1_1)          // 실행 자리는 HTTP/1.1 만 받는다 — 업그레이드를 시도하지 않는다
-            .build()
-    }
+    /**
+     * 호출마다 새 클라이언트 — 끝나면 닫는다. 시간 초과 · 끊김에서는 `shutdownNow()` 로 연결을 실제로 닫는다
+     * (`CompletableFuture.cancel(true)` 만으로는 데워지지 않은 JVM 의 첫 호출에서 연결이 닫히지 않았다). 실행 자리는 동시에 한 건이고 호출이 드물다
+     */
+    private fun newClient(): HttpClient = HttpClient.newBuilder()
+        .connectTimeout(connectTimeout)
+        .followRedirects(HttpClient.Redirect.NEVER)   // 비밀값이 다른 곳으로 가지 않게
+        .version(HttpClient.Version.HTTP_1_1)          // 실행 자리는 HTTP/1.1 만 받는다 — 업그레이드를 시도하지 않는다
+        .build()
 
     override fun ask(requestId: String, prompt: String, deadline: Instant): EscalateResult {
         if (!available) return EscalateResult.Refused(EscalateRefusal.UNAVAILABLE)
@@ -58,26 +60,35 @@ class ClaudeRunnerClient(
             .header(SECRET_HEADER, secret)
             .POST(HttpRequest.BodyPublishers.ofByteArray(body))
             .build()
-        val call = client.sendAsync(request, HttpResponse.BodyHandlers.ofByteArray())
-        // 남은 시간은 기다리기 직전에 다시 잰다 — 요청을 만드는 데 든 시간만큼 마감을 넘기지 않게
-        val waiting = Duration.between(clock.instant(), deadline)
-        val response = try {
-            // 기한은 호출 전체의 절대 마감 — 연결 · 머리글 · 몸을 다 받는 데까지
-            if (waiting.isNegative || waiting.isZero) throw TimeoutException()
-            call.get(waiting.toNanos(), TimeUnit.NANOSECONDS)
-        } catch (timeout: TimeoutException) {
-            call.cancel(true)
-            return EscalateResult.Refused(EscalateRefusal.TIMEOUT)
-        } catch (interrupted: InterruptedException) {
-            // 기다리는 쪽이 떠났다 — 결과로 삼키지 않는다(이력을 쓰지 않게). 글에는 아무 내용도 싣지 않는다
-            call.cancel(true)
-            throw InterruptedException("claude runner call interrupted")
-        } catch (failure: ExecutionException) {
-            val cause = failure.cause
-            return EscalateResult.Refused(
-                if (cause is HttpTimeoutException && cause !is HttpConnectTimeoutException) EscalateRefusal.TIMEOUT else EscalateRefusal.UNAVAILABLE)
+        val client = newClient()
+        var abandoned = false
+        try {
+            val call = client.sendAsync(request, HttpResponse.BodyHandlers.ofByteArray())
+            // 남은 시간은 기다리기 직전에 다시 잰다 — 요청을 만드는 데 든 시간만큼 마감을 넘기지 않게
+            val waiting = Duration.between(clock.instant(), deadline)
+            val response = try {
+                // 기한은 호출 전체의 절대 마감 — 연결 · 머리글 · 몸을 다 받는 데까지
+                if (waiting.isNegative || waiting.isZero) throw TimeoutException()
+                call.get(waiting.toNanos(), TimeUnit.NANOSECONDS)
+            } catch (timeout: TimeoutException) {
+                abandoned = true
+                call.cancel(true)
+                return EscalateResult.Refused(EscalateRefusal.TIMEOUT)
+            } catch (interrupted: InterruptedException) {
+                // 기다리는 쪽이 떠났다 — 결과로 삼키지 않는다(이력을 쓰지 않게). 글에는 아무 내용도 싣지 않는다
+                abandoned = true
+                call.cancel(true)
+                throw InterruptedException("claude runner call interrupted")
+            } catch (failure: ExecutionException) {
+                val cause = failure.cause
+                return EscalateResult.Refused(
+                    if (cause is HttpTimeoutException && cause !is HttpConnectTimeoutException) EscalateRefusal.TIMEOUT else EscalateRefusal.UNAVAILABLE)
+            }
+            return resultOf(response.statusCode(), response.body())
+        } finally {
+            // 기다림을 그만둔 호출은 연결을 곧바로 닫는다(shutdownNow — 기다리지 않는다). 끝난 호출은 닫아 스레드를 남기지 않는다
+            if (abandoned) client.shutdownNow() else client.close()
         }
-        return resultOf(response.statusCode(), response.body())
     }
 
     /** 실행 자리의 답 → 결과(명세 §20.1 의 표) */
