@@ -11,8 +11,10 @@ import java.time.Duration
 
 /** ES 접근 단일 창구 — 색인·검색 공용 (B3: 타임아웃·인덱스명 정책을 한 곳에). 쓰기·읽기 모두 alias 경유. */
 @Component
-class EsClient : IndexStore, SearchIndexPort {
-    private val baseUrl = System.getenv("ES_URL") ?: "http://elasticsearch:9200"
+class EsClient(private val baseUrl: String) : IndexStore, SearchIndexPort {
+    /** 운영의 주소 — 테스트는 가짜의 주소를 준다 */
+    @org.springframework.beans.factory.annotation.Autowired
+    constructor() : this(System.getenv("ES_URL") ?: "http://elasticsearch:9200")
     val indexName = "study-v1"
     val alias = "study"
 

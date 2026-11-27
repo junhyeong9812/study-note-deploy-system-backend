@@ -11,8 +11,10 @@ import java.time.Duration
 
 /** BGE-M3 dense 임베딩 (sparse는 1차 제외 — es-index.md D4 [구현 검증]). */
 @Component
-class EmbeddingClient : TextEncoder, QueryEncoder {
-    private val baseUrl = System.getenv("EMBEDDING_URL") ?: "http://embedding:8080"
+class EmbeddingClient(private val baseUrl: String) : TextEncoder, QueryEncoder {
+    /** 운영의 주소 — 테스트는 가짜의 주소를 준다 */
+    @org.springframework.beans.factory.annotation.Autowired
+    constructor() : this(System.getenv("EMBEDDING_URL") ?: "http://embedding:8080")
 
     private fun clientWith(readTimeout: Duration): RestClient = RestClient.builder()
         .baseUrl(baseUrl)
