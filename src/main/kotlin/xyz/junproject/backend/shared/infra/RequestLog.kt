@@ -38,6 +38,10 @@ class RequestLog(private val redis: StringRedisTemplate) {
         const val REQUEST_ID_ATTRIBUTE = "xyz.junproject.backend.requestId"
         /** 다른 서비스에 추적 ID 를 싣는 머리글 */
         const val REQUEST_ID_HEADER = "X-Request-Id"
+        /** 우리 서비스를 부를 때 자기 이름을 싣는 머리글(통신 규약 §2.2) — 지도의 표시에만 쓰인다(인증이 아니다) */
+        const val CALLER_SERVICE_HEADER = "X-Caller-Service"
+        /** 이 서비스의 규약 이름 — 코드의 상수(설정 · 들어온 요청에서 읽지 않는다) */
+        const val CALLER_SERVICE = "backend"
 
         fun isRequestId(value: String?): Boolean = value != null && REQUEST_ID.matches(value)
     }
