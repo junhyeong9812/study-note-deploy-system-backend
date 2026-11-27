@@ -212,6 +212,32 @@ class DependencyTookMsTest {
     }
 
     @Test
+    fun `Redis 확인 - 답을 기다리다 명령 시간 초과로 끝나면 null 이고 detail 은 그 글 그대로다`() {
+        // Lettuce 는 연결이 끊겨도 다시 붙을 때까지 명령을 쌓아 두어, Redis 가 멈추거나 죽어도 연결 실패가 아니라 명령 시간 초과로 끝난다
+        // (Spring Data Redis 가 RedisCommandTimeoutException 을 QueryTimeoutException 으로 옮긴다)
+        val stalled = mockk<StringRedisTemplate>().also {
+            every { it.execute(any<RedisCallback<String>>()) } throws org.springframework.dao.QueryTimeoutException("Redis command timed out")
+        }
+        val timedOut = realChecks(redis = stalled)["redis"]!!
+        assertEquals("DOWN", timedOut["status"])
+        assertTrue(timedOut.containsKey("took_ms"))
+        assertNull(timedOut["took_ms"], "답을 받지 못했는데 시간을 실었다")
+        assertEquals("Redis command timed out", timedOut["detail"], "detail 의 글이 바뀌었다")
+    }
+
+    @Test
+    fun `PostgreSQL 확인 - 질의 시간 초과로 끝나면 null 이다`() {
+        // 풀에 남은 연결로 질의가 걸린 경우 — spring-jdbc 가 SQLTimeoutException · SQLState 57014 를 QueryTimeoutException 으로 옮긴다
+        val stalled = mockk<JdbcTemplate>().also {
+            every { it.queryForObject("SELECT 1", Int::class.java) } throws org.springframework.dao.QueryTimeoutException("PreparedStatementCallback; SQL [SELECT 1]; ERROR: canceling statement due to statement timeout")
+        }
+        val timedOut = realChecks(jdbc = stalled)["postgres"]!!
+        assertEquals("DOWN", timedOut["status"])
+        assertNull(timedOut["took_ms"], "답을 받지 못했는데 시간을 실었다")
+        assertEquals("PreparedStatementCallback; SQL [SELECT 1]; ERROR: canceling statement due to statement timeout".take(120), timedOut["detail"])
+    }
+
+    @Test
     fun `PostgreSQL 확인 - 서버가 답하면 SQL 오류여도 정수이고 연결을 얻지 못하면 null 이다`() {
         val grammar = mockk<JdbcTemplate>().also {
             every { it.queryForObject("SELECT 1", Int::class.java) } throws BadSqlGrammarException("health", "SELECT 1", SQLException("syntax"))

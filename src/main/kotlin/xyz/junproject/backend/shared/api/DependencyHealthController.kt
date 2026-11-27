@@ -2,6 +2,7 @@ package xyz.junproject.backend.shared.api
 
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.dao.DataAccessResourceFailureException
+import org.springframework.dao.QueryTimeoutException
 import org.springframework.data.redis.core.StringRedisTemplate
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.web.bind.annotation.GetMapping
@@ -100,13 +101,24 @@ class DependencyHealthController(
             "redis" to {
                 val reply = try {
                     redis.execute { connection -> connection.ping() }
-                } catch (error: DataAccessResourceFailureException) { throw unreachable(error) }   // 연결에 실패 — 답을 받지 못했다
+                } catch (error: DataAccessResourceFailureException) {
+                    throw unreachable(error)   // 연결에 실패 — 답을 받지 못했다
+                } catch (error: QueryTimeoutException) {
+                    // 답을 기다리다 명령 시간 초과 — Lettuce 는 끊긴 연결에도 명령을 쌓아 두어 Redis 가 멈추거나 죽으면 이것으로 끝난다
+                    throw unreachable(error)
+                }
                 check(reply == "PONG") { "ping 응답이 다름: $reply" }
             },
             // 공부 기록 DB — 기본 헬스에는 넣지 않는다(DB 가 죽어도 읽기는 되고 자리 전환이 막히지 않게, 명세 11.1)
             "postgres" to {
                 // 연결을 얻지 못함은 받지 못함 — 서버가 답한 SQL 오류는 응답을 받은 것이다
-                try { studyJdbc.queryForObject("SELECT 1", Int::class.java) } catch (error: DataAccessResourceFailureException) { throw unreachable(error) }
+                try {
+                    studyJdbc.queryForObject("SELECT 1", Int::class.java)
+                } catch (error: DataAccessResourceFailureException) {
+                    throw unreachable(error)
+                } catch (error: QueryTimeoutException) {
+                    throw unreachable(error)   // 질의 시간 초과(SQLTimeoutException · SQLState 57014) — 제때 답을 받지 못했다
+                }
                 Unit
             },
         )
