@@ -6,6 +6,10 @@
 #   scripts/redis-persistence-check.sh run    # 실제 컨테이너로(몇 분)
 #   scripts/redis-persistence-check.sh        # 둘 다
 #
+# 주기적 다시 쓰기: compose 에는 `redis` 에 BGREWRITEAOF 를 주기로 시키는 곁 서비스가 하나 있다(이름은 보지 않는다 — 명령에 BGREWRITEAOF 가 든 서비스).
+# 그 주기는 compose 의 `${REDIS_AOF_REWRITE_INTERVAL_SECONDS:-1800}` 로 정한다(계약) — 이 검사는 그 변수를 몇 초로 주어 compose 를 다시 해석하고,
+# 해석된 곁 서비스의 명령을 그대로 띄운다(30분을 기다리지 않는다).
+#
 # 값은 가짜만 쓴다(주소는 문서용 대역 192.0.2.0/24 · 198.51.100.0/24 · 203.0.113.0/24). 띄운 컨테이너 · 볼륨은 이름에 이 실행의 접미사가 붙고,
 # 성공 · 실패와 무관하게 정확한 이름으로 지운다(prune 하지 않는다 · 운영과 같은 이름 `backend-redis` 는 쓰지 않는다).
 # compose 를 읽을 때 `.env` 를 읽지 않는다(--env-file /dev/null — 필요한 값은 가짜로 넣는다). 필요한 것: docker(compose v2) · python3.
@@ -27,11 +31,37 @@ fail() { echo "FAIL  $1"; failures=$((failures + 1)); }
 warn() { echo "WARN  $1"; }
 measure() { measurements+=("$1|$2"); }
 
-# --- compose 의 redis 서비스(해석된 꼴) -------------------------------------------------------------------------
-compose_json="$(cd /tmp && env -i PATH="$PATH" HOME="$HOME" \
-	BIND_ADDR=192.0.2.10 LLM_URL=http://192.0.2.11:8000 SYNC_SECRET=fake-sync STUDY_DB_NAME=fake STUDY_DB_USER=fake STUDY_DB_PASSWORD=fake-password \
-	docker compose --env-file /dev/null -p backend-redis-check -f "$compose_file" config --format json redis)" || {
-	echo "FAIL  docker compose config 가 compose 파일을 읽지 못했다" >&2; exit 1; }
+interval_variable="REDIS_AOF_REWRITE_INTERVAL_SECONDS"   # 곁 서비스의 주기(초) — compose 의 변수 이름(계약)
+short_interval=3                                       # 실행 검사에서 줄 주기(초)
+
+# --- compose(해석된 꼴 · 모든 서비스) -------------------------------------------------------------------------
+resolve_compose() {   # resolve_compose [덧붙일 환경 변수 …]
+	(cd /tmp && env -i PATH="$PATH" HOME="$HOME" \
+		BIND_ADDR=192.0.2.10 LLM_URL=http://192.0.2.11:8000 SYNC_SECRET=fake-sync STUDY_DB_NAME=fake STUDY_DB_USER=fake STUDY_DB_PASSWORD=fake-password "$@" \
+		docker compose --env-file /dev/null -p backend-redis-check -f "$compose_file" config --format json)
+}
+compose_json="$(resolve_compose)" || { echo "FAIL  docker compose config 가 compose 파일을 읽지 못했다" >&2; exit 1; }
+short_compose_json="$(resolve_compose "$interval_variable=$short_interval")" || { echo "FAIL  docker compose config(짧은 주기)가 실패했다" >&2; exit 1; }
+
+# 곁 서비스: redis 가 아닌 서비스 가운데 명령 · entrypoint · 환경에 BGREWRITEAOF 가 든 것
+rewriter_names() {   # rewriter_names <compose json>
+	python3 -c '
+import json, sys
+document = json.load(sys.stdin)
+for name, service in document["services"].items():
+    if name == "redis":
+        continue
+    text = json.dumps([service.get("command"), service.get("entrypoint"), service.get("environment")])
+    if "BGREWRITEAOF" in text.upper():
+        print(name)' <<<"$1"
+}
+mapfile -t rewriters < <(rewriter_names "$compose_json")
+rewriter_field() {   # rewriter_field <compose json> <python 식 — service 는 곁 서비스>
+	python3 -c 'import json,sys; document=json.load(sys.stdin); service=document["services"][sys.argv[2]]; print(eval(sys.argv[1]))' "$2" "${rewriters[0]}" <<<"$1"
+}
+rewriter_text() {    # 명령 · entrypoint · 환경을 한 덩어리 글자로
+	rewriter_field "$1" 'json.dumps([service.get("command"), service.get("entrypoint"), service.get("environment")], ensure_ascii=False)'
+}
 
 service_field() {   # service_field <python 식 — service 는 redis 서비스, document 는 전체>
 	python3 -c 'import json,sys; document=json.load(sys.stdin); service=document["services"]["redis"]; print(eval(sys.argv[1]))' "$1" <<<"$compose_json"
@@ -84,18 +114,42 @@ text_checks() {
 	if [ -z "$limits" ]; then fail "T10 README 에 '한계' 가 든 ## 절이 없다"
 	elif grep -q "AOF" <<<"$limits" && grep -q "다시 쓰기" <<<"$limits"; then pass "T10 README 의 한계 절이 AOF 와 다시 쓰기를 말한다"
 	else fail "T10 README 의 한계 절에 'AOF' · '다시 쓰기' 가 없다"; fi
+
+	# --- 곁 서비스(주기적 다시 쓰기) ---
+	if [ "${#rewriters[@]}" != "1" ]; then
+		fail "T11 redis 에 BGREWRITEAOF 를 시키는 서비스가 정확히 하나가 아니다: ${#rewriters[@]} 개(${rewriters[*]:-})"
+		return
+	fi
+	pass "T11 redis 에 BGREWRITEAOF 를 시키는 서비스가 하나다: ${rewriters[0]}"
+	local default_text short_text
+	default_text="$(rewriter_text "$compose_json")"; short_text="$(rewriter_text "$short_compose_json")"
+	if grep -qw "1800" <<<"$default_text" && ! grep -qw "1800" <<<"$short_text" && grep -qw "$short_interval" <<<"$short_text"; then
+		pass "T12 주기가 1800초이고 \$$interval_variable 로 덮어쓸 수 있다"
+	else fail "T12 주기가 글자로 1800 이 아니거나 \$$interval_variable 로 바뀌지 않는다: $default_text"; fi
+	[ "$(rewriter_field "$compose_json" 'service["image"]')" = "$image" ] && pass "T13 곁 서비스의 이미지가 redis 와 같다($image)" \
+		|| fail "T13 곁 서비스의 이미지가 redis($image)와 다르다: $(rewriter_field "$compose_json" 'service["image"]')"
+	local restart_policy; restart_policy="$(rewriter_field "$compose_json" 'service.get("restart") or ""')"
+	[ -n "$restart_policy" ] && [ "$restart_policy" != "no" ] && pass "T14 곁 서비스에 restart: $restart_policy" || fail "T14 곁 서비스에 restart: 가 없다"
+	if grep -qE -- '-h[ \\"]+redis([^-a-zA-Z0-9]|$)|redis://redis([:/"]|$)' <<<"$default_text"; then pass "T15 곁 서비스가 redis 서비스(-h redis)를 가리킨다"
+	else fail "T15 곁 서비스가 redis 서비스를 가리키지 않는다: $default_text"; fi
+	# Redis 가 늦게 뜨거나 다시 쓰기가 이미 도는 중이어도 죽지 않는 꼴 — 되풀이(while)가 있고, 실패에 끝내는 길(set -e · || exit)이 없다
+	if grep -q "while" <<<"$default_text" && ! grep -qE 'set -e|\|\|[ ]*exit|&&[ ]*exit' <<<"$default_text"; then
+		pass "T16 곁 서비스는 되풀이하고, 실패에 끝나는 길(set -e · || exit)이 없다"
+	else fail "T16 곁 서비스가 되풀이하지 않거나 실패에 끝난다: $default_text"; fi
 }
 
 # ============================================================================================================
 cleanup() {
 	# 이 실행이 띄운 것만 — 정확한 이름으로
 	local name
-	for name in "$prefix-redis" "$prefix-fresh" "$prefix-cost" "$prefix-memory-default" "$prefix-memory-one" "$prefix-quiet" "$prefix-corrupt"; do
+	for name in "$prefix-redis" "$prefix-fresh" "$prefix-cost" "$prefix-memory-default" "$prefix-memory-one" "$prefix-quiet" "$prefix-corrupt" \
+		"$prefix-rewriter" "$prefix-rewriter-redis"; do
 		docker rm -f -v "$name" >/dev/null 2>&1 || true
 	done
-	for name in "$data_volume" "$prefix-quiet-data" "$prefix-corrupt-data" "$prefix-permission-data"; do
+	for name in "$data_volume" "$prefix-quiet-data" "$prefix-corrupt-data" "$prefix-permission-data" "$prefix-rewriter-data"; do
 		docker volume rm "$name" >/dev/null 2>&1 || true
 	done
+	docker network rm "$prefix-network" >/dev/null 2>&1 || true
 }
 
 # 지운 항목의 글자를 바이트로 찾으려고 `--rdbcompression no` 만 덧붙인다 — 압축(LZF)은 바탕 파일 · DUMP 의 바이트 꼴만 바꾸고 어떤 항목이 남는지는
@@ -281,7 +335,8 @@ run_checks() {
 	measure "드문 날(하루 30건)" "$( [ "$quiet_left" = 0 ] && echo "사라짐" || echo "하루 몫 뒤에도 디스크에 남음") · 다음 자동 다시 쓰기까지 더 쌓여야 할 양 ≈ $needed_bytes 바이트(방문만이면 약 $(( needed_bytes / visit_bytes )) 건 — 로그 · 지표 쓰기가 함께 채운다)"
 	if [ "$quiet_seen" -lt 1 ]; then fail "R3c 대조 실패 — 지운 직후 AOF 에 원문이 없어 드문 날 · 다시 쓰기를 잴 수 없다"
 	elif [ "$quiet_left" = "0" ]; then pass "R3c 드문 날: 지운 방문이 디스크에서 사라졌다"
-	else warn "R3c 드문 날: 설정만으로는 지운 방문이 디스크에 남는다 — 1시간 상한은 주기적 다시 쓰기(BGREWRITEAOF)가 맡아야 한다(메인이 정할 것)"; fi
+	elif [ "${#rewriters[@]}" = "1" ]; then pass "R3c 드문 날: 설정만으로는 남는다 — 주기적 다시 쓰기 서비스(${rewriters[0]})가 맡는다(S1 에서 실제로 본다)"
+	else fail "R3c 드문 날: 지운 방문이 디스크에 남는데 주기적 다시 쓰기 서비스가 없다(자동 다시 쓰기만으로는 상한을 지키지 못한다)"; fi
 	local started=$(date +%s%N)
 	redis_in "$main" BGREWRITEAOF >/dev/null; wait_rewrite_done "$main"
 	measure "BGREWRITEAOF 한 번으로" "$( [ "$(on_disk "$main" "$quiet_marker")" = 0 ] && echo "사라짐" || echo "남음") · $(( ($(date +%s%N) - started) / 1000000 ))ms"
@@ -368,10 +423,123 @@ run_checks() {
 	done
 }
 
+# ============================================================================================================
+# 곁 서비스(주기적 다시 쓰기)를 compose 의 해석된 명령 그대로(주기만 $short_interval 초로) 띄워 본다
+container_state() { docker inspect -f '{{.State.Status}} restarts={{.RestartCount}}' "$1" 2>/dev/null || echo "missing"; }
+start_rewriter_redis() {   # 같은 네트워크에서 이름 `redis` 로 닿는 Redis(compose 의 redis 인자 그대로)
+	docker run -d --name "$prefix-rewriter-redis" --network "$prefix-network" --network-alias redis -v "$prefix-rewriter-data:/data" \
+		"$image" "${redis_command[@]}" --rdbcompression no >/dev/null || return 1
+	local attempt
+	for attempt in $(seq 1 50); do
+		[ "$(docker exec "$prefix-rewriter-redis" redis-cli ping 2>/dev/null)" = "PONG" ] && return 0
+		sleep 0.2
+	done
+	return 1
+}
+wait_rewrites_above() {   # wait_rewrites_above <이 수보다 커질 때까지> <최대 초> → 걸린 초(못 넘으면 실패)
+	local started=$(date +%s%N) current
+	while [ $(( ($(date +%s%N) - started) / 1000000000 )) -lt "$2" ]; do
+		current="$(rewrites_of "$prefix-rewriter-redis" 2>/dev/null)"
+		if [[ "$current" =~ ^[0-9]+$ ]] && [ "$current" -gt "$1" ]; then echo $(( ($(date +%s%N) - started) / 1000000 )); return 0; fi
+		sleep 0.2
+	done
+	return 1
+}
+rewriter_checks() {
+	echo "== 곁 서비스(주기적 다시 쓰기) — 주기 \$$interval_variable=$short_interval"
+	if [ "${#rewriters[@]}" != "1" ]; then fail "S0 곁 서비스가 정확히 하나가 아니라 실행 검사를 할 수 없다(${#rewriters[@]} 개)"; return; fi
+	local rewriter_command rewriter_entrypoint rewriter_environment restart_policy
+	# `config` 의 출력은 compose 의 이스케이프 `$$` 를 그대로 둔다 — `compose up` 이 컨테이너에 넘기는 꼴(`$`)로 되돌린다
+	mapfile -t rewriter_command < <(rewriter_field "$short_compose_json" '"\n".join(part.replace("$$", "$") for part in service.get("command") or [])')
+	mapfile -t rewriter_entrypoint < <(rewriter_field "$short_compose_json" '"\n".join(part.replace("$$", "$") for part in service.get("entrypoint") or [])')
+	mapfile -t rewriter_environment < <(rewriter_field "$short_compose_json" '"\n".join(k+"="+(v or "").replace("$$", "$") for k,v in (service.get("environment") or {}).items())')
+	restart_policy="$(rewriter_field "$short_compose_json" 'service.get("restart") or "no"')"
+	local run_arguments=(-d --name "$prefix-rewriter" --network "$prefix-network" --restart "$restart_policy")
+	local variable; for variable in "${rewriter_environment[@]}"; do [ -n "$variable" ] && run_arguments+=(-e "$variable"); done
+	if [ "${#rewriter_entrypoint[@]}" -gt 0 ] && [ -n "${rewriter_entrypoint[0]}" ]; then
+		run_arguments+=(--entrypoint "${rewriter_entrypoint[0]}" "$(rewriter_field "$short_compose_json" 'service["image"]')" "${rewriter_entrypoint[@]:1}")
+	else
+		run_arguments+=("$(rewriter_field "$short_compose_json" 'service["image"]')")
+	fi
+	docker network create "$prefix-network" >/dev/null
+	docker volume create "$prefix-rewriter-data" >/dev/null
+
+	# S2 Redis 가 아직 없을 때 띄운다 — 세 주기 동안 죽지 않는다
+	docker run "${run_arguments[@]}" "${rewriter_command[@]}" >/dev/null || { fail "S2 곁 서비스가 뜨지 않았다"; return; }
+	sleep $((short_interval * 3 + 1))
+	local state; state="$(container_state "$prefix-rewriter")"
+	measure "Redis 없이 $((short_interval * 3 + 1))초 뒤의 곁 컨테이너" "$state"
+	[ "$state" = "running restarts=0" ] && pass "S2a Redis 가 없어도 곁 컨테이너가 죽지 않는다($state)" || fail "S2a Redis 가 없을 때 곁 컨테이너가 죽거나 다시 떴다($state)"
+
+	# Redis 를 띄운 뒤의 주기에 다시 쓴다 + S1 드문 날 — 다른 쓰기 없이 한 주기 안에 사라진다
+	start_rewriter_redis || { fail "S1 Redis 가 뜨지 않았다"; return; }
+	local quiet_redis="$prefix-rewriter-redis" marker="203.0.113.123"
+	redis_in "$quiet_redis" XGROUP CREATE visits observe '$' MKSTREAM >/dev/null
+	local before_id after_id marker_id
+	before_id="$(redis_in "$quiet_redis" XADD visits '*' v 1 path /cs/b ip 198.51.100.121)"
+	marker_id="$(redis_in "$quiet_redis" XADD visits '*' v 1 path /cs/a ip "$marker")"
+	local seen; seen="$(on_disk "$quiet_redis" "$marker")"   # 대조 — 넣은 직후 AOF(덧붙임)에 원문이 있다(곁 서비스의 다음 회차 전에 본다)
+	after_id="$(redis_in "$quiet_redis" XADD visits '*' v 1 path /cs/b ip 198.51.100.122)"
+	redis_in "$quiet_redis" XREADGROUP GROUP observe check COUNT 10 STREAMS visits '>' >/dev/null
+	local rewrites_before; rewrites_before="$(rewrites_of "$quiet_redis")"
+	redis_in "$quiet_redis" XACK visits observe "$marker_id" >/dev/null; redis_in "$quiet_redis" XDEL visits "$marker_id" >/dev/null
+	local deleted_at=$(date +%s%N)
+	local waited=0
+	while [ "$(on_disk "$quiet_redis" "$marker")" != "0" ] && [ "$waited" -lt $((short_interval * 20 + 20)) ]; do sleep 0.5; waited=$((waited + 1)); done
+	local vanished_ms=$(( ($(date +%s%N) - deleted_at) / 1000000 )) left; left="$(on_disk "$quiet_redis" "$marker")"
+	local rewrites_after; rewrites_after="$(rewrites_of "$quiet_redis")"
+	measure "드문 날(다른 쓰기 없음) · 주기 ${short_interval}초" "넣은 직후 AOF 에 $seen 번 → 지운 뒤 $( [ "$left" = 0 ] && echo "${vanished_ms}ms 뒤 사라짐" || echo "$((vanished_ms / 1000))초 뒤에도 남음") · 그동안의 다시 쓰기 $((rewrites_after - rewrites_before)) 번"
+	if [ "$seen" -lt 1 ]; then fail "S1 대조 실패 — 넣은 직후 AOF 에 원문이 없다"
+	elif [ "$left" = "0" ] && [ "$vanished_ms" -le $(( (short_interval * 2 + 3) * 1000 )) ]; then pass "S1 드문 날: 다른 쓰기 없이 지운 방문이 한 주기 안에(${vanished_ms}ms) AOF 에서 사라진다"
+	else fail "S1 드문 날: 지운 방문이 한 주기($short_interval 초) 안에 AOF 에서 사라지지 않는다(${vanished_ms}ms · 남은 수 $left)"; fi
+	[ $((rewrites_after - rewrites_before)) -ge 1 ] && pass "S2b Redis 가 뜬 뒤의 주기에 다시 쓴다(다시 쓰기 $((rewrites_after - rewrites_before)) 번)" \
+		|| fail "S2b Redis 가 뜬 뒤에도 곁 서비스가 다시 쓰기를 시키지 않는다"
+	redis_in "$quiet_redis" XDEL visits "$before_id" "$after_id" >/dev/null
+
+	# S3 다시 쓰기가 이미 도는 중에 시켜도 죽지 않는다 — 다시 쓰기를 일부러 느리게(키마다 1초) 해 세 주기 넘게 걸치게 한다
+	local key; for key in $(seq 1 $((short_interval * 4))); do redis_in "$quiet_redis" SET "slow:$key" value >/dev/null; done
+	redis_in "$quiet_redis" CONFIG SET rdb-key-save-delay 1000000 >/dev/null
+	wait_rewrite_done "$quiet_redis"
+	redis_in "$quiet_redis" BGREWRITEAOF >/dev/null
+	local in_progress_started=$(date +%s)
+	sleep $((short_interval * 3))
+	local still_running; still_running="$(info_field "$quiet_redis" persistence aof_rewrite_in_progress)"
+	redis_in "$quiet_redis" CONFIG SET rdb-key-save-delay 0 >/dev/null
+	wait_rewrite_done "$quiet_redis"
+	local collision_lines; collision_lines="$(docker logs "$prefix-rewriter" 2>&1 | grep -ci 'already in progress')"
+	measure "다시 쓰기가 도는 중의 시킴" "느린 다시 쓰기가 $((short_interval * 3))초 넘게 걸침(그 시점 진행 중=$still_running) · 곁 컨테이너 로그의 'already in progress' 줄 $collision_lines"
+	if [ "$still_running" != "1" ]; then fail "S3 대조 실패 — 다시 쓰기가 세 주기 동안 이어지지 않아 겹침을 만들지 못했다"
+	else
+		state="$(container_state "$prefix-rewriter")"
+		local rewrites_now; rewrites_now="$(rewrites_of "$quiet_redis")"
+		if [ "$state" = "running restarts=0" ] && wait_rewrites_above "$rewrites_now" $((short_interval * 3)) >/dev/null; then
+			pass "S3 다시 쓰기가 도는 중에 시켜도(already in progress) 죽지 않고 다음 주기에 다시 쓴다($state)"
+		else fail "S3 다시 쓰기가 도는 중에 시킨 뒤 곁 컨테이너가 죽었거나 더 다시 쓰지 않는다($state)"; fi
+	fi
+
+	# S4 Redis 를 지웠다 다시 만들어도 이어서 돈다
+	docker rm -f "$prefix-rewriter-redis" >/dev/null
+	sleep $((short_interval * 2))
+	start_rewriter_redis || { fail "S4 Redis 를 다시 만들지 못했다"; return; }
+	local recreated_ms
+	if recreated_ms="$(wait_rewrites_above 0 $((short_interval * 3)))"; then
+		state="$(container_state "$prefix-rewriter")"
+		[ "$state" = "running restarts=0" ] && pass "S4 Redis 를 다시 만든 뒤에도 이어서 다시 쓰기를 시킨다(${recreated_ms}ms 뒤 · $state)" \
+			|| fail "S4 Redis 를 다시 만든 사이에 곁 컨테이너가 죽었다가 다시 떴다($state)"
+	else fail "S4 Redis 를 다시 만든 뒤 곁 서비스가 다시 쓰기를 시키지 않는다($(container_state "$prefix-rewriter"))"; fi
+
+	# S5 곁 컨테이너의 로그 — 방문의 원문 · 비밀값이 없다
+	local rewriter_log; rewriter_log="$(docker logs "$prefix-rewriter" 2>&1)"
+	local leaked; leaked="$(grep -cE '203\.0\.113\.|198\.51\.100\.|fake-password|fake-sync' <<<"$rewriter_log")"
+	measure "곁 컨테이너의 로그" "$(wc -l <<<"$rewriter_log") 줄 · 종류: $(sort <<<"$rewriter_log" | uniq -c | sort -rn | head -4 | tr -s ' ' | tr '\n' ';')"
+	[ "$leaked" = "0" ] && pass "S5 곁 컨테이너의 로그에 방문의 원문(주소) · 비밀값이 없다" || fail "S5 곁 컨테이너의 로그에 주소 · 비밀값이 $leaked 줄 실렸다"
+	docker rm -f -v "$prefix-rewriter" "$prefix-rewriter-redis" >/dev/null 2>&1
+}
+
 case "$mode" in
 	text) text_checks ;;
-	run) trap cleanup EXIT; run_checks ;;
-	all) text_checks; trap cleanup EXIT; run_checks ;;
+	run) trap cleanup EXIT; run_checks; rewriter_checks ;;
+	all) text_checks; trap cleanup EXIT; run_checks; rewriter_checks ;;
 	*) echo "쓰임: $0 [text|run|all]" >&2; exit 2 ;;
 esac
 
