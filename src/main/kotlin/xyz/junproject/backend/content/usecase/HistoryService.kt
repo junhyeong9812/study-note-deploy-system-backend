@@ -96,7 +96,7 @@ class HistoryService(
     companion object {
         /** 최근 변경에 싣는 커밋의 수 */
         const val RECENT_COMMIT_LIMIT = 30
-        /** 최근 변경을 찾으려 훑는 커밋의 수(숨김 폴더만 고친 커밋은 건너뛴다) */
+        /** 최근 변경을 찾으려 훑는 커밋의 수(숨김 폴더 · 실습 폴더만 고친 커밋은 건너뛴다) */
         const val RECENT_SCAN_LIMIT = 200
         /** 커밋 하나에 싣는 글의 수 — 넘으면 "외 n개" */
         const val DOCS_PER_COMMIT_LIMIT = 50
