@@ -42,3 +42,14 @@ interface EscalatePort {
     val available: Boolean
     fun ask(requestId: String, prompt: String): String
 }
+
+/**
+ * 대화 이력(Redis `chat:{session}:{문서 경로}`)을 세션 단위로 보고 지운다 — 내 기록 지우기(명세 12 · 18).
+ * sessionId 는 부르는 쪽이 꼴(`chat_session` 의 UUID 꼴)을 확인한 값이다. Redis 오류는 DataAccessException 으로 던진다.
+ */
+interface ChatHistoryPort {
+    /** 그 세션의 대화 이력이 하나라도 있나 */
+    fun hasHistory(sessionId: String): Boolean
+    /** 그 세션의 대화 이력을 모두 지운다 — 다른 세션의 것은 건드리지 않는다 */
+    fun deleteHistory(sessionId: String)
+}

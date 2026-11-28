@@ -2,6 +2,7 @@ package xyz.junproject.backend.shared.api
 
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.data.redis.core.StringRedisTemplate
+import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.RestController
 import java.net.URI
@@ -24,7 +25,7 @@ class DependencyHealthController(
     private val budget: Duration = Duration.ofSeconds(3),
 ) {
     @Autowired
-    constructor(redis: StringRedisTemplate) : this(defaultChecks(redis))
+    constructor(redis: StringRedisTemplate, studyJdbc: JdbcTemplate) : this(defaultChecks(redis, studyJdbc))
 
     /** 항상 200 — 어느 것이 안 되는지는 본문의 components 로 알린다(부르는 쪽이 판정한다). */
     @GetMapping("/api/health/dependencies")
@@ -61,7 +62,7 @@ class DependencyHealthController(
             check(!Regex(""""status"\s*:\s*"red"""").containsMatchIn(clusterHealthBody)) { "cluster status red" }
         }
 
-        fun defaultChecks(redis: StringRedisTemplate): Map<String, () -> Unit> = linkedMapOf(
+        fun defaultChecks(redis: StringRedisTemplate, studyJdbc: JdbcTemplate): Map<String, () -> Unit> = linkedMapOf(
             "elasticsearch" to {
                 requireUsableCluster(expectOk((System.getenv("ES_URL") ?: "http://elasticsearch:9200") + "/_cluster/health"))
             },
@@ -70,6 +71,8 @@ class DependencyHealthController(
                 val reply = redis.execute { connection -> connection.ping() }
                 check(reply == "PONG") { "ping 응답이 다름: $reply" }
             },
+            // 공부 기록 DB — 기본 헬스에는 넣지 않는다(DB 가 죽어도 읽기는 되고 자리 전환이 막히지 않게, 명세 11.1)
+            "postgres" to { studyJdbc.queryForObject("SELECT 1", Int::class.java); Unit },
         )
     }
 }

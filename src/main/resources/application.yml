@@ -9,8 +9,15 @@ spring:
   data:
     redis:
       url: ${LOG_REDIS_URL:redis://redis:6379}   # 미지정 시 Spring 기본 localhost = 컨테이너 자신 (함정)
+      # Redis 가 응답 없이 멈춰도 요청이 오래 붙잡히지 않게(명세 20) — 없으면 명령마다 60초를 기다린다. 요청 로그(XADD) · 대화 이력 · 채팅
+      # 이력(LRANGE · RPUSH · EXPIRE) · 헬스(PING) 모두 짧은 명령이라 1초를 넘겨 기다리는 쓰임(블로킹 읽기 · 구독)이 없다
+      timeout: 1s
+      connect-timeout: 1s
 management:
   endpoints:
     web:
       exposure:
         include: health
+# 공부 기록 DB(study.db.url · user · password)는 여기 적지 않는다 — 환경 변수 STUDY_DB_URL · STUDY_DB_USER · STUDY_DB_PASSWORD 가
+# 그대로 그 키가 되고(스프링의 느슨한 이름 맞추기), 값이 없을 때의 기본은 ProgressConfiguration 에 있다(값이 없어도 앱은 뜬다).
+# 여기 적으면 이 파일이 SpringApplicationBuilder.properties 로 준 값(엔진 테스트)보다 앞서 그 값을 가린다(실측).

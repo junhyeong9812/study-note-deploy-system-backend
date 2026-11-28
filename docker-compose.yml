@@ -15,6 +15,10 @@ x-app: &app
     STUDY_NOTE_REMOTE: https://github.com/junhyeong9812/study-note.git
     REPO_DIR: /data/study-note/repo
     STATE_FILE: /data/study-note/last_sha
+    # 공부 기록 DB — 아래 postgres 와 같은 값(.env 의 STUDY_DB_*)으로 조립한다. 비밀번호는 .env 에만
+    STUDY_DB_URL: jdbc:postgresql://postgres:5432/${STUDY_DB_NAME:?set-in-env}
+    STUDY_DB_USER: ${STUDY_DB_USER:?set-in-env}
+    STUDY_DB_PASSWORD: ${STUDY_DB_PASSWORD:?set-in-env}
   volumes:
     - study-note-repo:/data/study-note       # clone 볼륨 (sync가 pull)
   depends_on:
@@ -94,6 +98,26 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+    restart: unless-stopped
+
+  # 공부 기록(방문자 · 퀴즈 시도). profiles 가 없어 이름 없이 `docker compose up -d` 해도 뜬다. 두 자리가 같은 DB 를 본다.
+  # 앱은 depends_on 으로 이것을 기다리지 않는다 — DB 가 죽어도 앱은 뜨고 읽기는 된다(명세 11.1). 관측 서버의 DB 와는 따로다.
+  postgres:
+    image: postgres:17-alpine
+    container_name: backend-postgres
+    environment:
+      POSTGRES_DB: ${STUDY_DB_NAME:?set-in-env}
+      POSTGRES_USER: ${STUDY_DB_USER:?set-in-env}
+      POSTGRES_PASSWORD: ${STUDY_DB_PASSWORD:?set-in-env}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data   # 호스트 디렉터리 — 이름 있는 볼륨은 `compose down -v` 한 번에 함께 지워진다
+    # ports 를 두지 않는다 — LAN 에도 호스트에도 열지 않고, 같은 compose 네트워크의 두 자리만 닿는다
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    mem_limit: 512m
     restart: unless-stopped
 
   embedding:

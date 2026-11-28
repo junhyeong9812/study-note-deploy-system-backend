@@ -25,9 +25,24 @@ class ChatService(
         const val HISTORY_TURNS = 10          // 모델에 싣는 최근 항목 수 [구현 검증]
         const val DOC_CONTEXT_CHARS = 12_000  // 문서 컨텍스트 상한 [구현 검증]
         val TTL: Duration = Duration.ofDays(7)
+
+        /** 대화 이력의 키 `chat:{session}:{문서 경로}` — 키 꼴은 여기 한 곳(이력 지우기의 [historyKeyPattern] 도 이것을 쓴다) */
+        private const val HISTORY_KEY_PREFIX = "chat:"
+        /** `chat_session` 값의 꼴(UUID 의 글자) — 꼴이 틀린 값은 세션으로 쓰지 않는다 */
+        private val SESSION_ID = Regex("^[0-9a-f-]{36}$")
+
+        fun isSessionId(value: String): Boolean = SESSION_ID.matches(value)
+
+        fun historyKey(sessionId: String, docPath: String) = "$HISTORY_KEY_PREFIX$sessionId:$docPath"
+
+        /** 그 세션의 이력 키 전부를 찾는 SCAN 패턴 — 꼴이 맞는 세션만 받는다(꼴의 글자에는 패턴 글자 `*` `?` `[` 가 없다) */
+        fun historyKeyPattern(sessionId: String): String {
+            require(isSessionId(sessionId)) { "not a chat session id" }
+            return "$HISTORY_KEY_PREFIX$sessionId:*"
+        }
     }
 
-    private fun key(sessionId: String, docPath: String) = "chat:$sessionId:$docPath"
+    private fun key(sessionId: String, docPath: String) = historyKey(sessionId, docPath)
 
     data class ChatMessage(val role: String, val content: String)
 
