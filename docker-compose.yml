@@ -9,6 +9,7 @@ x-app: &app
     LLM_URL: ${LLM_URL:?set-in-env}          # .164 wrapper (배포 .env — repo에 IP 금지)
     CLAUDE_BRIDGE_URL: ${CLAUDE_BRIDGE_URL:-} # 에스컬레이션 브리지 — 비우면 escalate_unavailable
     BRIDGE_SECRET: ${BRIDGE_SECRET:-}          # 브리지 인증
+    OWNER_COOKIE_SECRET: ${OWNER_COOKIE_SECRET:-} # 주인 표시 쿠키의 서명 열쇠(어드민과 같은 값) — 비우면 누구도 주인이 아니다
     LOG_REDIS_URL: redis://redis:6379
     SERVER_NAME: backend
     SYNC_SECRET: ${SYNC_SECRET:?set-in-env}

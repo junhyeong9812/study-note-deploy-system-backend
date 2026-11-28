@@ -28,8 +28,15 @@ data class ChatIn(val doc_path: String? = null, val question: String? = null)
 /** 채팅 API — 세션 쿠키(id만, HttpOnly) 발급/검증은 여기(중앙 발급 규약). 스트림은 MVC 비동기. */
 @RestController
 @RequestMapping("/api/chat")
-class ChatController(private val chatService: ChatService, private val requestLog: RequestLog,
-                     private val objectMapper: ObjectMapper) {
+class ChatController @org.springframework.beans.factory.annotation.Autowired constructor(
+    private val chatService: ChatService, private val requestLog: RequestLog,
+    private val objectMapper: ObjectMapper,
+    /** Claude 로 가는 경로(`/escalate`)의 주인 판정 */
+    private val ownerJudge: xyz.junproject.backend.owner.usecase.OwnerJudge,
+) {
+    /** 주인 판정 없이 만든 것 — 열쇠가 없는 판정(누구도 주인이 아니다)을 쓴다 */
+    constructor(chatService: ChatService, requestLog: RequestLog, objectMapper: ObjectMapper) :
+        this(chatService, requestLog, objectMapper, xyz.junproject.backend.owner.usecase.OwnerJudge(null, java.time.Clock.systemUTC(), requestLog))
 
     // 가상 스레드 — 대기열에 선 연결(최대 2+8)을 플랫폼 스레드 없이 붙잡는다. 동시 수 상한은 llm 대기열이 소유
     private val streamExecutor = Executors.newVirtualThreadPerTaskExecutor()
@@ -176,6 +183,10 @@ class ChatController(private val chatService: ChatService, private val requestLo
                  @RequestHeader("X-Request-Id", required = false) incomingId: String?):
             ResponseEntity<Map<String, Any?>> {
         val requestId = requestLog.acceptOrIssue(incomingId)
+        // 주인의 판정이 먼저 — 주인이 아니면 몸의 검증 결과도 보이지 않고, 세션 쿠키도 심지 않으며, Claude 쪽에 닿지 않는다
+        if (!ownerJudge.judge(requestId, request).owner) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Envelope.fail("owner_only"))
+        }
         val docPath = body.doc_path ?: ""
         val question = body.question?.trim() ?: ""
         if (!PathGuard.isSafeMarkdownPath(docPath) || PathGuard.isHidden(docPath) || question.isEmpty()) {
