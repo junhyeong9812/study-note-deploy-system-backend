@@ -90,6 +90,7 @@ class LlmChatStreamClient(
             .header("Accept", "application/x-ndjson")
             // 추적 ID 를 머리글로도(다시 보내는 요청도 여기서 새로 만든다) — 꼴이 맞을 때만. 본문의 request_id 는 호환으로 그대로
             .also { builder -> if (RequestLog.isRequestId(requestId)) builder.header(RequestLog.REQUEST_ID_HEADER, requestId) }
+            .header(RequestLog.CALLER_SERVICE_HEADER, RequestLog.CALLER_SERVICE)   // 우리 서비스(llm)를 부른다 — 자기 이름(다시 보내는 요청도)
             .POST(HttpRequest.BodyPublishers.ofString(body))
             .build()
         val response = try {
