@@ -121,7 +121,7 @@ class GitRepository(
                 throw ShaUnresolvableException("prev=$prevSha (shallow 경계 밖 추정)")
             else throw error
         }
-        // denylist(docs·templates)는 색인·트리 입력에서 제외 (PathGuard.HIDDEN_TOP_LEVEL)
+        // 숨김(denylist docs·templates · 실습 폴더)은 색인·트리 입력에서 제외 (PathGuard.isHidden)
         return parseNameStatus(output).filter { !PathGuard.isHidden(it.second) }
     }
 
@@ -313,7 +313,7 @@ class GitRepository(
         /** 이력 읽기의 커밋 머리 — 커밋마다 기록 구분 문자(0x1e)로 시작하고 sha · 커밋 시각 · 제목 한 줄을 NUL 로 가른다(본문 · 글쓴이는 읽지 않는다) */
         private const val HISTORY_FORMAT = "%x1e%H%x00%cI%x00%s"
 
-        /** 공개되는 글 — `.md` 이고 숨김 폴더 밖 */
+        /** 공개되는 글 — `.md` 이고 숨김(숨김 폴더 · 실습 폴더) 밖 */
         private fun isPublicDoc(path: String): Boolean = path.endsWith(".md") && !PathGuard.isHidden(path)
 
         /** 바뀐 파일 하나 — [path] 는 마지막 칸(옮김 · 복사면 새 경로), [oldPath] 는 옮김 · 복사의 옛 경로 */

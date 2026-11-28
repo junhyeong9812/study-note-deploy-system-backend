@@ -48,7 +48,7 @@ class HistoryController(
             return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
                 .body(Envelope.fail("invalid_request", detail = "path must be a repo-relative .md"))
         }
-        if (PathGuard.isHidden(path)) {   // 숨김 폴더는 존재 은닉(404) — /api/doc 과 같다
+        if (PathGuard.isHidden(path)) {   // 숨김(숨김 폴더 · 실습 폴더)은 존재 은닉(404) — /api/doc 과 같다
             requestLog.log(requestId, "history doc hidden: $path", "warning")
             return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Envelope.fail("not_found"))
         }
