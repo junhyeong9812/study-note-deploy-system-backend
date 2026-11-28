@@ -60,7 +60,8 @@ enum class EscalateRefusal(val word: String) {
 sealed interface EscalateResult {
     data class Answered(val text: String, val truncated: Boolean) : EscalateResult
     /** [code]: 상대가 준 오류 코드(있으면 — 로그의 `code=`) */
-    data class Refused(val reason: EscalateRefusal, val code: String? = null) : EscalateResult
+    /** [status]: 상대가 답한 HTTP 상태 코드 — 실행 자리의 "못 씀"(unavailable)에만(로그의 `status=` · 연결하지 못했으면 없다) */
+    data class Refused(val reason: EscalateRefusal, val code: String? = null, val status: Int? = null) : EscalateResult
 }
 
 /**

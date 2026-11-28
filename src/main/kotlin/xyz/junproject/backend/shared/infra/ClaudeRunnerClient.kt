@@ -101,7 +101,7 @@ class ClaudeRunnerClient(
                 val truncated = data.path("truncated").let { it.isBoolean && it.booleanValue() }
                 return EscalateResult.Answered(text.stringValue(), truncated)
             }
-            return EscalateResult.Refused(EscalateRefusal.UNAVAILABLE)
+            return EscalateResult.Refused(EscalateRefusal.UNAVAILABLE, status = status)
         }
         val code = envelope?.takeIf { it.isObject }?.path("error")?.path("code")
             ?.takeIf { it.isString }?.stringValue()
@@ -110,13 +110,17 @@ class ClaudeRunnerClient(
                 "busy" -> EscalateRefusal.BUSY
                 "limit_reached" -> EscalateRefusal.LIMIT_REACHED
                 "disabled" -> EscalateRefusal.DISABLED
-                else -> EscalateRefusal.UNAVAILABLE
+                else -> return unavailable(status, code)
             })
             504 -> EscalateResult.Refused(EscalateRefusal.TIMEOUT)
             in BACKEND_FAULT_STATUSES -> EscalateResult.Refused(EscalateRefusal.REJECTED, code?.takeIf { it in KNOWN_REJECTION_CODES })
-            else -> EscalateResult.Refused(EscalateRefusal.UNAVAILABLE)
+            else -> unavailable(status, code)
         }
     }
+
+    /** 실행 자리가 "못 씀"으로 답했다 — 상태 코드와, 알려진 낱말일 때만 그 낱말(그 밖의 글자는 로그로 새지 않게 싣지 않는다) */
+    private fun unavailable(status: Int, code: String?): EscalateResult =
+        EscalateResult.Refused(EscalateRefusal.UNAVAILABLE, code?.takeIf { it in KNOWN_UNAVAILABLE_CODES }, status)
 
     companion object {
         const val SECRET_HEADER = "X-Claude-Runner-Secret"
@@ -127,6 +131,11 @@ class ClaudeRunnerClient(
         private val KNOWN_REJECTION_CODES = setOf(
             "unauthorized", "length_required", "bad_length", "invalid_body", "unknown_field", "unknown_purpose",
             "empty_prompt", "prompt_too_long", "unencodable_prompt", "invalid_request_id", "not_found",
+        )
+        /** "못 씀"의 줄에 싣는 실행 자리의 낱말 — 같은 관례(실행 자리의 계약에 있는 낱말만) */
+        private val KNOWN_UNAVAILABLE_CODES = setOf(
+            "claude_failed", "bad_output", "invalid_answer", "token_missing", "claude_unavailable",
+            "limits_unavailable", "ledger_unavailable", "internal", "timeout",
         )
     }
 }
