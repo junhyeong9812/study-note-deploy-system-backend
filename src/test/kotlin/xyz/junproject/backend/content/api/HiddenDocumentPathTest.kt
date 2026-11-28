@@ -175,7 +175,7 @@ class HiddenDocumentPathTest {
             val history = chatMvc.perform(get(URI.create("/api/chat/history?doc_path=${encoded(path)}"))).andReturn().response
             assertRejectedWithoutSecret(history, "/api/chat/history doc_path=$path")
         }
-        verify(exactly = 0) { chatService.chat(any(), any(), any(), any(), any()) }
+        verify(exactly = 0) { chatService.chat(any(), any(), any(), any(), any(), any(), any()) }
         verify(exactly = 0) { chatService.escalateAnswer(any(), any(), any(), any()) }
         verify(exactly = 0) { chatService.history(any(), any()) }
     }

@@ -7,8 +7,10 @@ import xyz.junproject.backend.chat.usecase.ChatEvent
 import xyz.junproject.backend.chat.usecase.ChatStreamPort
 import xyz.junproject.backend.chat.usecase.LlmUnreachable
 import java.io.IOException
+import java.net.ConnectException
 import java.net.URI
 import java.net.http.HttpClient
+import java.net.http.HttpConnectTimeoutException
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.nio.channels.UnresolvedAddressException
@@ -73,6 +75,10 @@ class LlmChatStreamClient(
         }
     }
 
+    /** 연결 단계의 실패인가 — 연결 거부 · 연결 시간 초과 · 주소를 풀지 못함. 헤더 시간 초과 · 연결 직후 끊김은 아니다 */
+    private fun failedToConnect(error: IOException): Boolean =
+        error is ConnectException || error is HttpConnectTimeoutException || error.cause is UnresolvedAddressException
+
     /** 한 번의 요청. llm 이 retry 로 넘겼으면 true(다시 보내야 함), 그 밖에는 false(끝났거나 오류 이벤트를 냈음). */
     private fun streamOnce(requestId: String, messages: List<Map<String, String>>,
                            onEvent: (ChatEvent) -> Unit, resend: Boolean): Boolean {
@@ -95,10 +101,11 @@ class LlmChatStreamClient(
                 client.send(request, HttpResponse.BodyHandlers.ofInputStream())
             }
         } catch (error: IOException) {
-            // 연결 거부·연결/헤더 타임아웃·연결 직후 끊김 — 응답을 시작도 못 했으면 서버가 꺼진 것으로 본다
-            throw LlmUnreachable(error)
+            // 연결 거부·연결/헤더 타임아웃·연결 직후 끊김 — 응답을 시작도 못 했으면 서버가 꺼진 것으로 본다.
+            // 그 가운데 첫 시도가 연결 단계에서 실패한 것만 "연결되지 못함"(서버가 요청을 받지 못했다 — 자동 넘김의 조건)
+            throw LlmUnreachable(error, neverConnected = !resend && failedToConnect(error))
         } catch (error: UnresolvedAddressException) {
-            throw LlmUnreachable(error)
+            throw LlmUnreachable(error, neverConnected = !resend)
         }
         response.body().use { input ->
             if (response.statusCode() != 200) {

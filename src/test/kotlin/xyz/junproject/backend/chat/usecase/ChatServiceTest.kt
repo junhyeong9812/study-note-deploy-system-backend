@@ -35,8 +35,9 @@ class ChatServiceTest {
         val received = run(serviceEmitting(ChatEvent.Queued(1), ChatEvent.Start,
             ChatEvent.Token("가"), ChatEvent.Token("나"), ChatEvent.Done))
         assertEquals(5, received.size)                                  // 이벤트는 전부 그대로 전달
-        verify(exactly = 1) { listOperations.rightPush("chat:session:cs/a.md", match { it.contains("질문") }) }
-        verify(exactly = 1) { listOperations.rightPush("chat:session:cs/a.md", match { it.contains("가나") }) }
+        // 질문 · 답 두 줄은 한 명령으로 쓴다(명세 §21-8 — 질문만 남는 일이 없게)
+        verify(exactly = 1) { listOperations.rightPushAll("chat:session:cs/a.md", match { it.contains("질문") }, match { it.contains("가나") }) }
+        verify(exactly = 0) { listOperations.rightPush(any(), any<String>()) }
     }
 
     @Test
@@ -44,12 +45,14 @@ class ChatServiceTest {
         val received = run(serviceEmitting(ChatEvent.Queued(1), ChatEvent.Error("queue_timeout")))
         assertEquals(ChatEvent.Error("queue_timeout"), received.last())
         verify(exactly = 0) { listOperations.rightPush(any(), any<String>()) }
+        verify(exactly = 0) { listOperations.rightPushAll(any(), *anyVararg<String>()) }
     }
 
     @Test
     fun `생성 도중 오류로 끊기면 받은 토큰이 있어도 이력에 남기지 않는다`() {
         run(serviceEmitting(ChatEvent.Start, ChatEvent.Token("반쯤"), ChatEvent.Error("upstream")))
         verify(exactly = 0) { listOperations.rightPush(any(), any<String>()) }
+        verify(exactly = 0) { listOperations.rightPushAll(any(), *anyVararg<String>()) }
     }
 
     @Test
@@ -63,6 +66,7 @@ class ChatServiceTest {
             mockk(relaxed = true), ObjectMapper())
         assertThrows(LlmUnreachable::class.java) { service.chat("req-1", "s", "cs/a.md", "q") {} }
         verify(exactly = 0) { listOperations.rightPush(any(), any<String>()) }
+        verify(exactly = 0) { listOperations.rightPushAll(any(), *anyVararg<String>()) }
     }
 
     @Test
@@ -73,6 +77,6 @@ class ChatServiceTest {
                 if (event is ChatEvent.Done) throw IllegalStateException("client gone")
             }
         }
-        verify(exactly = 1) { listOperations.rightPush("chat:session:cs/a.md", match { it.contains("완성") }) }
+        verify(exactly = 1) { listOperations.rightPushAll("chat:session:cs/a.md", any<String>(), match { it.contains("완성") }) }
     }
 }

@@ -59,7 +59,7 @@ class ChatPracticePathTest {
                 .cookie(Cookie(OwnerCookie.NAME, ownerMarkValue))).andReturn().response
             assertSameAsHidden(escalate, hiddenEscalate, "/api/chat/escalate doc_path=$path")
         }
-        verify(exactly = 0) { chatService.chat(any(), any(), any(), any(), any()) }
+        verify(exactly = 0) { chatService.chat(any(), any(), any(), any(), any(), any(), any()) }
         verify(exactly = 0) { chatService.history(any(), any()) }
         verify(exactly = 0) { chatService.escalateAnswer(any(), any(), any(), any()) }
     }

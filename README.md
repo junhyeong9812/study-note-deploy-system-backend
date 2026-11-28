@@ -57,7 +57,7 @@ content/   {api, usecase, domain}    ContentController · TreeService · NoteSou
 
 ## 주인 판정
 
-Claude 로 가는 경로(지금은 `POST /api/chat/escalate`)는 주인만 지난다. 주인은 서버가 쿠키 하나로 판정한다 — 머리 · 질의 · 몸의 칸 · 다른 쿠키는 보지 않는다.
+Claude 로 가는 경로(`POST /api/chat/escalate` · `POST /api/chat` 의 자동 넘김)는 주인만 지난다. 주인은 서버가 쿠키 하나로 판정한다 — 머리 · 질의 · 몸의 칸 · 다른 쿠키는 보지 않는다.
 
 - 쿠키 `study_owner` = `ow1.<만든 시각 ms>.<서명>`. 서명은 HMAC-SHA256(열쇠 = `OWNER_COOKIE_SECRET` 의 UTF-8 바이트, 줄 = `study-owner` LF `ow1` LF `<만든 시각 ms>`)의 base64url(채움 없음 43글자)이고 글자 그대로 상수 시간에 견준다. 만든 시각에서 30일까지 받고, 지금보다 60초 넘게 앞선 시각은 받지 않는다. 쿠키를 심고 지우는 것은 어드민이다 — backend 는 읽기만 한다.
 - 열쇠 `OWNER_COOKIE_SECRET`: 어드민과 같은 값 · 32바이트 이상. 없거나 짧으면 **누구도 주인이 아니다**(닫힌 쪽 — 뜰 때 그 이름을 말하는 WARN 한 줄).
@@ -73,6 +73,32 @@ Claude 로 가는 경로(지금은 `POST /api/chat/escalate`)는 주인만 지�
 | `malformed` | 같은 이름의 쿠키가 둘 이상(톰캣이 읽어 낸 쿠키 기준 — 값의 꼴이 틀려 톰캣이 버린 쿠키는 세지 않는다) · 값의 꼴이 틀림 · 만든 시각이 지금보다 60초 넘게 앞섬 |
 | `bad_signature` | 서명이 맞지 않는다(다른 열쇠 · 고친 값) |
 | `expired` | 만든 시각에서 30일이 지났다 |
+
+## Claude 로 넘김
+
+로컬 모델에 **연결되지 못하면** 주인의 질문을 Claude 실행 자리(`study-note-deploy-system-claude`)가 답한다. 단추(`POST /api/chat/escalate`)도 같은 실행 자리를 부른다.
+
+- 설정: `CLAUDE_RUNNER_URL` · `CLAUDE_RUNNER_SECRET`(실행 자리의 호출용 비밀값과 같은 값). 둘 다 있으면 실행 자리를, 아니면 옛 통로(`CLAUDE_BRIDGE_URL` · `BRIDGE_SECRET`)를 쓴다 — 옛 통로는 단추에만 쓰고 자동 넘김은 하지 않는다. 고르는 곳은 `EscalateConfiguration` 한 곳.
+- 자동 넘김의 조건(모두): ① 주인(SSE 를 시작하기 전에 쿠키로 판정 — 옛 계약의 글자 흐름은 넘기지 않는다) ② 그 질문의 **첫 시도가 연결 단계에서** 실패(연결 거부 · 연결 시간 초과 3초 · 주소를 풀지 못함 — 헤더 시간 초과 · 연결 직후 끊김 · 줄 밀림 · 도중 끊김 · 교체 중 다시 보낸 요청의 실패는 넘기지 않는다) ③ 실행 자리가 설정돼 있음 ④ 요청을 받은 때부터 170초의 마감까지 20초 이상 남음. 아니면 지금 그대로 `error{code:"llm_unreachable"}`.
+- 이벤트(지금의 꼴에 더하기만): `escalated{}` → `token{text}`(답 한 번) → `truncated{}`(잘렸을 때만) → `done{}`. 거절이면 `escalated{}` → `error{code}`. 한 질문에 실행 자리 호출은 많아야 한 번(재시도 없음).
+- 실행 자리를 부르는 법: `POST <URL>/runs` · 머리글 `X-Claude-Runner-Secret` · `Content-Length` 가 있는 JSON 몸 · 리다이렉트를 따라가지 않는다 · 연결 3초 · 기한은 호출 전체의 절대 마감(자동 넘김은 남은 시간, 단추는 135초). 호출마다 클라이언트를 만들어 끝나면 닫고, 기한이 지나거나 기다리던 쪽이 떠나면 그 클라이언트를 곧바로 닫아(`shutdownNow`) 실행 자리 쪽 연결도 닫힌다. 프롬프트는 60,000자를 넘지 않는다(문서는 40,000자까지 — 넘으면 자르고 한 줄). 문서를 읽지 못하면 부르지 않는다.
+
+| 실행 자리의 답 | 결과 | 자동 넘김의 코드 | 단추의 응답 |
+|---|---|---|---|
+| 200 · `data.text` | 답 | `token` | 200 `{answer, truncated}` |
+| 429 `busy` | `busy` | `claude_busy` | 429 `claude_busy` |
+| 429 `limit_reached` | `limit_reached` | `claude_limit` | 429 `claude_limit` |
+| 429 `disabled` | `disabled` | `claude_disabled` | 429 `claude_disabled` |
+| 504 · 기한 초과 | `timeout` | `claude_timeout` | 504 `claude_timeout` |
+| 503 · 502 · 500 · 연결 실패 · 꼴이 틀린 답 · 모르는 코드 | `unavailable` | `claude_unavailable` | 503 `escalate_failed` |
+| 400 · 401 · 404 · 411 · 413 · 422 (backend 의 설정 · 코드 잘못) | `rejected` | `claude_unavailable` | 503 `escalate_failed` |
+| (부를 곳이 없음) | | (넘기지 않음 — `llm_unreachable`) | 503 `escalate_unavailable` |
+
+- 이력: 답을 받았을 때만 질문 · 답 두 줄을 한 명령(`RPUSH` 두 값)으로 쓴다 — 로컬의 답도 같다. Claude 의 답 줄에만 `"source":"claude"` 가 있고 `GET /api/chat/history` 가 그 칸을 그대로 낸다. Claude 의 답은 이력을 먼저 쓰고 보낸다(보내다 끊겨도 남는다). 기다리다 끊기면 쓰지 않는다.
+- 로그(프롬프트 · 질문 · 답 · 비밀값 없음): `claude run: result=<answered|busy|limit_reached|disabled|timeout|unavailable|rejected|abandoned> auto=<true|false> duration_ms=<수>`(+ `truncated=true` · `rejected` 면 `code=<실행 자리의 코드>`). 답은 info · `rejected` 는 error · 그 밖의 거절은 warning. 로컬의 완료 로그도 질문 · 답의 길이만 남긴다.
+- 한계: 브라우저가 떠나면 기다리던 호출을 끊지만 실행 자리의 실행은 끝까지 돌 수 있다 — 한도 하나를 쓴다. 떠난 것을 아는 데는 **약 30초**가 걸린다 — keep-alive 는 15초마다지만 떠난 직후의 첫 keep-alive 는 버퍼에 들어가 성공하고, 그다음 것이 실패한다(실측 30.06초). 끊긴 호출은 `claude run: result=abandoned auto=… duration_ms=…`(warning) 한 줄을 남기고 이력은 쓰지 않는다.
+- `rejected` 의 `code=` 는 실행 자리의 알려진 코드(`unauthorized` · `length_required` · `bad_length` · `invalid_body` · `unknown_field` · `unknown_purpose` · `empty_prompt` · `prompt_too_long` · `unencodable_prompt` · `invalid_request_id` · `not_found`)일 때만 쓴다 — 그 밖의 코드는 칸 자체를 쓰지 않는다.
+- 짝 글자: 실행 자리는 UTF-8 로 바꿀 수 없는 프롬프트를 거절한다(422 `unencodable_prompt`). 그래서 문서(4만 자) · 이력(500자)을 자르는 끝이 짝 글자(이모지 등)의 가운데면 한 글자 덜 자르고, 원래 글(질문 · 이력 · 문서)에 짝이 없는 반쪽(홀로 선 서로게이트)이 있으면 U+FFFD 로 바꿔 싣는다.
 
 ## 한계 — Redis 의 디스크 저장
 
