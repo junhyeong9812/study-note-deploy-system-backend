@@ -3,6 +3,7 @@ package xyz.junproject.backend.quiz.usecase
 import org.springframework.dao.DataAccessException
 import xyz.junproject.backend.chat.usecase.ChatHistoryPort
 import xyz.junproject.backend.chat.usecase.ChatService
+import xyz.junproject.backend.content.domain.PathGuard
 import xyz.junproject.backend.content.usecase.NoteSourcePort
 import xyz.junproject.backend.progress.domain.Grade
 import xyz.junproject.backend.progress.domain.QuestionProgress
@@ -146,7 +147,8 @@ class QuizService(
         private val QUESTION_HASH = Regex("[0-9a-f]{64}")
         private val QUESTION_NUMBER = Regex("\\d{1,9}")
 
-        fun isTopicPath(value: String): Boolean = TOPIC_PATH.matches(value)
+        /** 실습 폴더(주제 폴더 안의 `practice/`)와 그 아래는 주제가 아니다 — 주제 경로는 폴더뿐이라 끝에 `/` 를 붙여 모든 마디를 폴더로 본다 */
+        fun isTopicPath(value: String): Boolean = TOPIC_PATH.matches(value) && !PathGuard.isPracticePath("$value/")
     }
 
     private val newVisitorLock = Any()
