@@ -42,15 +42,6 @@ class ContentController(
         return ResponseEntity.ok(Envelope.ok(mapOf("count" to docs.size, "docs" to docs)))
     }
 
-    @GetMapping("/history")
-    fun history(@RequestHeader("X-Request-Id", required = false) incomingId: String?):
-            ResponseEntity<Map<String, Any?>> {
-        val requestId = requestLog.acceptOrIssue(incomingId)
-        val commits = git.recentCommits(30)
-        requestLog.log(requestId, "history ${commits.size} commits")
-        return ResponseEntity.ok(Envelope.ok(mapOf("commits" to commits)))
-    }
-
     @GetMapping("/doc")
     fun getDoc(@RequestParam path: String,
                @RequestParam(required = false) at: String?,
@@ -62,7 +53,7 @@ class ContentController(
             return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
                 .body(Envelope.fail("invalid_request", detail = "path must be a repo-relative .md"))
         }
-        if (xyz.junproject.backend.content.domain.PathGuard.isHidden(path)) {   // denylist는 존재 은닉(404)
+        if (xyz.junproject.backend.content.domain.PathGuard.isHidden(path)) {   // 숨김(denylist · 실습 폴더)은 존재 은닉(404)
             requestLog.log(requestId, "doc hidden: $path", "warning")
             return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Envelope.fail("not_found"))
         }

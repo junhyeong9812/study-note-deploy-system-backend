@@ -22,6 +22,8 @@ class SyncService(
     private val indexing: IndexingService,
     private val tree: TreeService,
     private val requestLog: RequestLog,
+    /** 동기화가 끝날 때 최근 변경을 다시 계산한다 */
+    private val historyService: xyz.junproject.backend.content.usecase.HistoryService,
 ) {
     private val stateFile = File(System.getenv("STATE_FILE") ?: "/data/study-note/last_sha")
     private val inFlightSha = AtomicReference<String?>(null)
@@ -54,6 +56,7 @@ class SyncService(
         "progress" to progress,
         "last_processed_sha" to readLastSha(),
         "last_result" to lastResult,
+        "history" to git.historyState().let { history -> mapOf("shallow" to history.shallow, "problem" to history.problem) },
     )
 
     private fun runPipeline(requestId: String, prevSha: String?, full: Boolean = false) {
@@ -62,6 +65,11 @@ class SyncService(
         progress = null
         try {
             val headSha = git.syncToRemoteHead()
+            // 전체 이력으로 바꾸지 못해도 글은 바뀐다 — 실패는 이 동기화의 요청 ID 로 드러낸다
+            val history = git.historyState()
+            if (history.problem != null) {
+                requestLog.log(requestId, "sync history: shallow=${history.shallow} problem=${history.problem.take(300)}", "warning")
+            }
             // 요청 SHA(멱등 키)는 유지하고, 원격 HEAD가 다르면 기록만 (B13 — Actions 경합 관찰용)
             if (inFlightSha.get() != headSha && inFlightSha.get() != "unknown") {
                 requestLog.log(requestId, "sync note: requested=${inFlightSha.get()} head=$headSha")
@@ -86,6 +94,7 @@ class SyncService(
             }
             if (effectiveFull) indexing.deleteStale(requestId, headSha)   // 고아 정리 (B7)
             tree.rebuild(requestId, headSha)   // 트리는 sync 성공 시에만 변한다 (#12)
+            historyService.rebuild(requestId, headSha)   // 최근 변경도 이때 한 번 — 실패는 WARN 으로 남고 동기화는 성공
             writeLastSha(headSha)      // 전량 성공 후에만 전진 (D5-3)
             val tookMs = System.currentTimeMillis() - startedMs
             requestLog.log(requestId, "sync ok sha=$headSha files=${changes.size} chunks=$chunks ${tookMs}ms")

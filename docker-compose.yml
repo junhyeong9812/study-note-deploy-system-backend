@@ -9,6 +9,7 @@ x-app: &app
     LLM_URL: ${LLM_URL:?set-in-env}          # .164 wrapper (배포 .env — repo에 IP 금지)
     CLAUDE_BRIDGE_URL: ${CLAUDE_BRIDGE_URL:-} # 에스컬레이션 브리지 — 비우면 escalate_unavailable
     BRIDGE_SECRET: ${BRIDGE_SECRET:-}          # 브리지 인증
+    OWNER_COOKIE_SECRET: ${OWNER_COOKIE_SECRET:-} # 주인 표시 쿠키의 서명 열쇠(어드민과 같은 값) — 비우면 누구도 주인이 아니다
     LOG_REDIS_URL: redis://redis:6379
     SERVER_NAME: backend
     SYNC_SECRET: ${SYNC_SECRET:?set-in-env}
@@ -63,6 +64,11 @@ services:
       # git 작업 트리를 직접 읽게 하면 배포 중 소스 갱신만으로 운영 설정이 바뀐다.
       - ./deploy/active:/etc/nginx:ro
     restart: unless-stopped
+    logging:   # 접속 기록(통신 규약 v1)이 표준 출력으로 가므로 크기를 묶는다 — 에이전트는 json-file 을 도커 API 로 읽는다
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   elasticsearch:
     build: ./elasticsearch
