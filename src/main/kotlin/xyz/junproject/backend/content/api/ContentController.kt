@@ -53,7 +53,7 @@ class ContentController(
             return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
                 .body(Envelope.fail("invalid_request", detail = "path must be a repo-relative .md"))
         }
-        if (xyz.junproject.backend.content.domain.PathGuard.isHidden(path)) {   // denylist는 존재 은닉(404)
+        if (xyz.junproject.backend.content.domain.PathGuard.isHidden(path)) {   // 숨김(denylist · 실습 폴더)은 존재 은닉(404)
             requestLog.log(requestId, "doc hidden: $path", "warning")
             return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Envelope.fail("not_found"))
         }
