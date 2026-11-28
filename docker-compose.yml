@@ -64,6 +64,11 @@ services:
       # git 작업 트리를 직접 읽게 하면 배포 중 소스 갱신만으로 운영 설정이 바뀐다.
       - ./deploy/active:/etc/nginx:ro
     restart: unless-stopped
+    logging:   # 접속 기록(통신 규약 v1)이 표준 출력으로 가므로 크기를 묶는다 — 에이전트는 json-file 을 도커 API 로 읽는다
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   elasticsearch:
     build: ./elasticsearch
