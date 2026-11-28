@@ -34,4 +34,39 @@ class PathGuardTest {
         assertTrue(PathGuard.isSafeMarkdownPath("cs/x.md"))
         assertFalse(PathGuard.isHidden("cs/x.md"))
     }
+
+    // 마디 `.` 과 빈 마디(`//` · 처음 · 끝의 `/`)는 거절한다 — 파일 읽기 · git 이 경로를 정규화하면 `./docs/x.md` 가 숨김 폴더의 글을 가리킨다.
+    // 점으로 시작하는 이름(`.hidden-name.md`)이나 이름 안의 점 둘(`a..b.md`)은 마디 `.` · `..` 이 아니다
+
+    @Test
+    fun `마디 점과 빈 마디가 든 경로는 안전하지 않다`() {
+        val rejected = listOf(
+            "./docs/x.md", ".//docs/x.md", "cs/./a.md", "cs//a.md", "./a.md", "docs/./x.md",
+            "cs/a.md/", "./", ".", "cs/.", "cs/a/./b.md", "cs/a//b.md", "//cs/a.md", "cs/./../docs/x.md",
+        )
+        val accepted = rejected.filter { path -> PathGuard.isSafeMarkdownPath(path) }
+        assertEquals(emptyList<String>(), accepted, "거절해야 할 경로를 받았다")
+    }
+
+    @Test
+    fun `점으로 시작하는 이름과 이름 안의 점 둘과 한글 이름과 지금까지 받던 경로는 그대로 받는다`() {
+        val accepted = listOf(
+            "cs/a.md", "index.md", "cs/.hidden-name.md", "cs/a..b.md", "cs/...md",
+            "programmers/힙/01-더 맵게/1-question.md", "cs/lsm-tree/2-summary.md", "cs/systems/lsm-tree/1-question.md",
+            "project/study-note-deploy-system/backend/issue1/README.md", "reference/organize-guide.md", "README.md",
+            "docs.md", "templates-guide.md",
+        )
+        val rejected = accepted.filterNot { path -> PathGuard.isSafeMarkdownPath(path) }
+        assertEquals(emptyList<String>(), rejected, "받아야 할 경로를 거절했다")
+    }
+
+    @Test
+    fun `지금까지 거절하던 경로는 그대로 거절한다`() {
+        val rejected = listOf(
+            "../../../etc/passwd", "cs/../../secret.md", "/etc/passwd.md", "~/x.md", ".git/config.md", "cs/.git/x.md",
+            "cs/lsm-tree/2-summary.txt", "", "cs/..", "../x.md",
+        )
+        val accepted = rejected.filter { path -> PathGuard.isSafeMarkdownPath(path) }
+        assertEquals(emptyList<String>(), accepted, "거절하던 경로를 받았다")
+    }
 }
