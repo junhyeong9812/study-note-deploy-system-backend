@@ -10,7 +10,6 @@ import org.springframework.test.web.servlet.request.MockMvcRequestBuilders
 import org.springframework.test.web.servlet.setup.MockMvcBuilders
 import tools.jackson.databind.json.JsonMapper
 import xyz.junproject.backend.chat.usecase.ChatHistoryPort
-import xyz.junproject.backend.content.usecase.CommitInfo
 import xyz.junproject.backend.content.usecase.NoteSourcePort
 import xyz.junproject.backend.progress.LogCapture
 import xyz.junproject.backend.progress.domain.Grade
@@ -76,7 +75,9 @@ class FakeNoteSource : NoteSourcePort {
         reads += path
         return current[path] ?: throw FileNotFoundException(path)
     }
-    override fun recentCommits(limit: Int): List<CommitInfo> = emptyList()
+    override fun recentChanges(commitLimit: Int, scanLimit: Int, docLimit: Int): List<xyz.junproject.backend.content.usecase.CommitChanges> = emptyList()
+    override fun documentHistory(path: String, limit: Int): xyz.junproject.backend.content.usecase.DocHistory = throw FileNotFoundException(path)
+    override fun historyState(): xyz.junproject.backend.sync.usecase.HistoryState = xyz.junproject.backend.sync.usecase.HistoryState.UNKNOWN
     override fun readFileAt(sha: String, path: String): String {
         readsAt += sha to path
         if (path in failingPaths || (sha to path) in failingAt) throw IllegalStateException("git timeout (fake): show $sha:$path")

@@ -53,4 +53,28 @@ class ContentControllerTest {
         assertEquals(500, response.status, response.contentAsString)
         assertTrue(response.contentAsString.contains("\"internal\""), response.contentAsString)
     }
+
+    // 옛 판을 여는 길은 이미 있는 `/api/doc?at=` 이다(변경 이력은 그 길로 옛 판을 연다) — 판의 표시는 16진 7~64자만 받는다.
+    // 가지 이름 · 상대 표시(`HEAD~1`) · 옵션처럼 보이는 글자는 git 에 닿기 전에 거절한다
+
+    @Test
+    fun `옛 판의 표시가 16진이 아니면 422 이고 git 을 부르지 않는다`() {
+        val git = mockk<NoteSourcePort>(relaxed = true)
+        val controller = ContentController(git, mockk(relaxed = true), mockk(relaxed = true))
+        listOf("HEAD~1", "HEAD", "main", "--output=/tmp/x", "-p", "abc", "ABCDEF1", "abcdef1 ", "abcdef1:cs/a.md", "a".repeat(65)).forEach { at ->
+            val response = controller.getDoc("cs/os/process/2-summary.md", at, null)
+            assertEquals(422, response.statusCode.value(), "거절해야 할 판의 표시($at)")
+        }
+        io.mockk.verify(exactly = 0) { git.readFileAt(any(), any()) }
+    }
+
+    @Test
+    fun `옛 판의 표시가 16진 40자면 그 판의 그 글을 읽는다`() {
+        val git = mockk<NoteSourcePort>(relaxed = true)
+        val sha = "0123456789abcdef0123456789abcdef01234567"
+        every { git.readFileAt(sha, "cs/os/process/2-summary.md") } returns "# old\n"
+        val response = ContentController(git, mockk(relaxed = true), mockk(relaxed = true)).getDoc("cs/os/process/2-summary.md", sha, null)
+        assertEquals(200, response.statusCode.value())
+        assertEquals("# old\n", ((response.body as Map<*, *>)["data"] as Map<*, *>)["markdown"])
+    }
 }

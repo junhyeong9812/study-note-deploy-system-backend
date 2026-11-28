@@ -14,6 +14,7 @@ import xyz.junproject.backend.shared.api.GlobalErrorHandler
 import java.io.File
 import java.io.FileNotFoundException
 import java.nio.file.Path
+import java.time.Duration
 import java.util.concurrent.TimeUnit
 
 /**
@@ -77,7 +78,7 @@ class GitRepositoryReadAtObjectTest {
         write("docs/secret.md", "# plan\n${secrets[0]}\n")
         write("docs/plans/x.md", "# deep\n${secrets[1]}\n")
         write("templates/t.md", "# template\n${secrets[2]}\n")
-        // 공개 글과 같은 꼴(`cs/<주제>/1-question.md`)을 숨김 폴더 안에 — 폴더의 tree 를 판으로 주면 공개 경로처럼 보인다
+        // 퀴즈가 읽는 꼴(`cs/<주제>/1-question.md`)을 숨김 폴더 안에 — 퀴즈의 판 지정 읽기도 같은 함수를 쓴다
         write("docs/cs/os/1-question.md", "# question\n${secrets[3]}\n")
         firstCommit = commit("first")
         prepare("-c", "user.name=tester", "-c", "user.email=tester@example.invalid", "tag", "-a", "v1", "-m", "release one", firstCommit)
@@ -93,12 +94,7 @@ class GitRepositoryReadAtObjectTest {
         assertEquals("tag", prepare("cat-file", "-t", tagObject), "준비: 주석 달린 태그가 아니다")
     }
 
-    /** [GitRepository] 는 저장소 폴더를 환경 변수(REPO_DIR)로만 받는다 — 만든 뒤 그 칸을 임시 저장소로 바꾼다(SyncServiceTest 의 stateFile 과 같은 꼴) */
-    private fun repository(): GitRepository = GitRepository().also { git ->
-        val field = GitRepository::class.java.getDeclaredField("repoDir")
-        field.isAccessible = true
-        field.set(git, repoDir)
-    }
+    private fun repository() = GitRepository(repoDir, "git", requestTimeout = Duration.ofSeconds(10), syncTimeout = Duration.ofSeconds(30))
 
     private fun assertNotFound(at: String, path: String) {
         val outcome = try { repository().readFileAt(at, path) } catch (error: Exception) { error }

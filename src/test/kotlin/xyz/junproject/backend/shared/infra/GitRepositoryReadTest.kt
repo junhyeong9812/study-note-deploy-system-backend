@@ -110,4 +110,46 @@ class GitRepositoryReadTest {
     fun `기본 시간 제한은 5초다`() {
         assertEquals(Duration.ofSeconds(5), GitRepository.REQUEST_TIMEOUT)
     }
+
+    // 요청 중의 읽기는 시간 초과 때 종료 신호 뒤에 기다리지 않는다 — 기다림(기본 5초)이 붙으면 요청 상한(5초)을 넘긴다.
+    // 종료 신호를 무시하는 가짜 git 으로 본다(신호에 곧 죽는 가짜로는 기다림이 붙어도 드러나지 않는다). 기다림은 기본값 그대로 둔다.
+    private val gitPidFile by lazy { File(temp.toFile(), "git.pid") }
+    private val ignoresTermination by lazy {
+        "echo \$\$ > '${gitPidFile.absolutePath}'; trap '' TERM; while :; do sleep 0.1; done"
+    }
+
+    /** `/proc/<pid>/stat` 이 없거나 좀비(Z)면 돌지 않는다 — 신호가 닿는 틈으로 1초를 둔다 */
+    private fun stillRunning(pid: Long): Boolean {
+        val deadline = System.currentTimeMillis() + 1000
+        while (true) {
+            val state = try { File("/proc/$pid/stat").readText().substringAfterLast(")").trim().firstOrNull() } catch (_: Exception) { null }
+            if (state == null || state == 'Z') return false
+            if (System.currentTimeMillis() >= deadline) return true
+            Thread.sleep(50)
+        }
+    }
+
+    private fun assertEndsWithoutWaiting(read: (GitRepository) -> Unit) {
+        val git = repository(ignoresTermination, timeout = Duration.ofMillis(300))
+        val started = System.nanoTime()
+        val failure = assertTimeoutPreemptively(Duration.ofSeconds(10), ThrowingSupplier { failureOf { read(git) } })
+        val tookMillis = Duration.ofNanos(System.nanoTime() - started).toMillis()
+
+        assertFalse(failure is FileNotFoundException, "시간 초과가 없음으로 바뀌었다")
+        assertTrue(failure.message?.contains("timeout") == true, failure.message)
+        // 상한(0.3초) + 1초 — 종료 신호 뒤에 기다림(5초)이 붙으면 넘는다
+        assertTrue(tookMillis < 1300, "요청 중의 읽기가 시간 초과 뒤에 기다렸다: ${tookMillis}ms")
+        assertTrue(gitPidFile.exists(), "가짜 git 이 pid 를 남기지 않았다")
+        assertFalse(stillRunning(gitPidFile.readText().trim().toLong()), "종료 신호를 무시한 가짜 git 이 남았다")
+    }
+
+    @Test
+    fun `판을 지정한 읽기는 종료 신호를 무시하는 git 도 시간 초과 뒤 기다리지 않고 끊는다`() {
+        assertEndsWithoutWaiting { git -> git.readFileAt(sha, path) }
+    }
+
+    @Test
+    fun `지금 판을 얻는 읽기는 종료 신호를 무시하는 git 도 시간 초과 뒤 기다리지 않고 끊는다`() {
+        assertEndsWithoutWaiting { git -> git.currentHead() }
+    }
 }
